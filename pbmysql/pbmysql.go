@@ -4,12 +4,17 @@ import (
 	"database/sql"
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/golang/protobuf/proto"
 	"google.golang.org/protobuf/encoding/protowire"
-	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/descriptorpb"
+	"pbmysql-go/dbproto"
 	"strconv"
 	"strings"
+)
+
+const (
+	kPrimaryKeyIndex = 0
 )
 
 func EscapeString(str string, db *sql.DB) string {
@@ -68,7 +73,6 @@ func (p *Pb2DbTables) SetMysql(mysql *sql.DB) {
 //}
 
 func FillMessageField(message proto.Message, row []string) {
-
 	reflection := proto.MessageReflect(message)
 	dscrpt := reflection.Descriptor()
 	for i := 0; i < dscrpt.Fields().Len(); i++ {
@@ -139,8 +143,7 @@ func FillMessageField(message proto.Message, row []string) {
 		case protoreflect.MessageKind:
 			if row[i] != "" {
 				subMessage := reflection.Mutable(field).Message()
-
-				proto.Unmarshal([]byte(row[i]), subMessage)
+				proto.Unmarshal([]byte(row[i]), proto.MessageV1(subMessage))
 			}
 		}
 	}
@@ -161,7 +164,7 @@ var tableNameDescriptor = []string{
 }
 
 func ConvertFieldValue(message proto.Message, fieldDesc protoreflect.FieldDescriptor, db *sql.DB) string {
-	reflection := message.ProtoReflect()
+	reflection := proto.MessageReflect(message)
 	fieldValue := ""
 	switch fieldDesc.Kind() {
 	case protoreflect.Int32Kind:
@@ -183,7 +186,7 @@ func ConvertFieldValue(message proto.Message, fieldDesc protoreflect.FieldDescri
 	case protoreflect.MessageKind:
 		if reflection.Has(fieldDesc) {
 			subMessage := reflection.Get(fieldDesc).Message()
-			data, _ := subMessage.MarshalText()
+			data, _ := proto.Marshal(proto.MessageV1(subMessage))
 			fieldValue = string(data)
 		}
 	}
@@ -193,7 +196,7 @@ func ConvertFieldValue(message proto.Message, fieldDesc protoreflect.FieldDescri
 
 type Message2MysqlSql struct {
 	tableName         string
-	options           *Options
+	options           descriptorpb.MessageOptions
 	primaryKey        []string
 	indexes           []string
 	uniqueKeys        []string
@@ -204,7 +207,7 @@ type Message2MysqlSql struct {
 	primaryKeyField   protoreflect.FieldDescriptor
 }
 
-func NewMessage2MysqlSql(tableName string, options *Options, descriptor protoreflect.MessageDescriptor) *Message2MysqlSql {
+func NewMessage2MysqlSql(tableName string, options descriptorpb.MessageOptions, descriptor protoreflect.MessageDescriptor) *Message2MysqlSql {
 	return &Message2MysqlSql{
 		tableName:  tableName,
 		options:    options,
@@ -214,18 +217,27 @@ func NewMessage2MysqlSql(tableName string, options *Options, descriptor protoref
 
 func (m *Message2MysqlSql) GetCreateTableSql() string {
 	sql := "CREATE TABLE IF NOT EXISTS " + m.tableName
-	if m.options.GetExtension(OptionPrimaryKey) != "" {
-		m.primaryKey = strings.Split(m.options.GetExtension(OptionPrimaryKey), ",")
+
+	//descriptorpb.MessageOptions.ProtoReflect.Descriptor.ExtensionRanges
+	primaryKeyExtName := dbproto.E_OptionPrimaryKey.TypeDescriptor().Name()
+	primaryKeyExtField := m.descriptor.Extensions().ByName(primaryKeyExtName)
+	if primaryKeyExtField != nil {
+		m.primaryKey = strings.Split(string(primaryKeyExtField.FullName()), ",")
 	}
-	if m.options.GetExtension(OptionIndex) != "" {
-		m.indexes = strings.Split(m.options.GetExtension(OptionIndex), ",")
+	optionIndexKeyExtName := dbproto.E_OptionIndex.TypeDescriptor().Name()
+	optionIndexKeyExtField := m.descriptor.Extensions().ByName(optionIndexKeyExtName)
+	if optionIndexKeyExtField != nil {
+		m.indexes = strings.Split(string(optionIndexKeyExtField.FullName()), ",")
 	}
-	if m.options.GetExtension(OptionUniqueKey) != "" {
-		m.uniqueKeys = strings.Split(m.options.GetExtension(OptionUniqueKey), ",")
+	optionUniqueKeyExtName := dbproto.E_OptionUniqueKey.TypeDescriptor().Name()
+	optionUniqueKeyExtField := m.descriptor.Extensions().ByName(optionUniqueKeyExtName)
+	if optionUniqueKeyExtField != nil {
+		m.uniqueKeys = strings.Split(string(optionUniqueKeyExtField.FullName()), ",")
 	}
-	m.autoIncreaseKey = m.options.GetExtension(OptionAutoIncrementKey)
-	m.foreignKeys = m.options.GetExtension(OptionForeignKey)
-	m.foreignReferences = m.options.GetExtension(OptionForeignReferences)
+	m.autoIncreaseKey = string(m.descriptor.Extensions().ByName(dbproto.E_OptionAutoIncrementKey.TypeDescriptor().Name()).FullName())
+
+	m.foreignKeys = string(m.descriptor.Extensions().ByName(dbproto.E_OptionForeignKey.TypeDescriptor().Name()).FullName())
+	m.foreignReferences = string(m.descriptor.Extensions().ByName(dbproto.E_OptionForeignReferences.TypeDescriptor().Name()).FullName())
 	sql += " ("
 	needComma := false
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
@@ -235,18 +247,18 @@ func (m *Message2MysqlSql) GetCreateTableSql() string {
 		} else {
 			needComma = true
 		}
-		sql += field.Name()
+		sql += string(field.Name())
 		sql += " "
 		sql += tableNameDescriptor[field.Kind()]
 		if i == kPrimaryKeyIndex {
 			sql += " NOT NULL"
 		}
-		if field.Name() == m.autoIncreaseKey {
+		if string(field.Name()) == m.autoIncreaseKey {
 			sql += " AUTO_INCREMENT"
 		}
 	}
 	sql += ", PRIMARY KEY ("
-	sql += m.options.GetExtension(OptionPrimaryKey)
+	sql += string(primaryKeyExtField.Name())
 	sql += ")"
 	if m.foreignKeys != "" && m.foreignReferences != "" {
 		sql += ", FOREIGN KEY ("
@@ -257,7 +269,7 @@ func (m *Message2MysqlSql) GetCreateTableSql() string {
 	}
 	if len(m.uniqueKeys) > 0 {
 		sql += ", UNIQUE KEY ("
-		sql += m.options.GetExtension(OptionUniqueKey)
+		sql += string(optionUniqueKeyExtField.Name())
 		sql += ")"
 	}
 	for _, index := range m.indexes {
@@ -279,11 +291,11 @@ func (m *Message2MysqlSql) GetAlterTableAddFieldSql() string {
 	sql := "ALTER TABLE " + m.tableName
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
 		field := m.descriptor.Fields().Get(i)
-		if _, ok := m.primaryKey[i]; ok {
+		if m.primaryKey[i] != "" {
 			continue
 		}
 		sql += " ADD COLUMN "
-		sql += field.Name()
+		sql += string(field.Name())
 		sql += " "
 		sql += tableNameDescriptor[field.Kind()]
 		if i+1 < m.descriptor.Fields().Len() {
@@ -307,7 +319,7 @@ func (m *Message2MysqlSql) GetInsertSql(message proto.Message, db *sql.DB) strin
 		} else {
 			needComma = true
 		}
-		sql += m.descriptor.Fields().Get(i).Name()
+		sql += string(m.descriptor.Fields().Get(i).Name())
 	}
 	sql += ") VALUES ("
 	needComma = false
@@ -335,7 +347,7 @@ func (m *Message2MysqlSql) GetInsertOnDupUpdateSql(message proto.Message, db *sq
 func (m *Message2MysqlSql) GetInsertOnDupKeyForPrimaryKey(message proto.Message, db *sql.DB) string {
 	sql := m.GetInsertSql(message, db)
 	sql += " ON DUPLICATE KEY UPDATE "
-	sql += " " + m.primaryKeyField.Name()
+	sql += " " + string(m.primaryKeyField.Name())
 	value := ConvertFieldValue(message, m.primaryKeyField, db)
 	sql += "="
 	sql += "'" + value + "';"
@@ -351,7 +363,7 @@ func (m *Message2MysqlSql) GetSelectSql(key, val string) string {
 		} else {
 			needComma = true
 		}
-		sql += m.descriptor.Fields().Get(i).Name()
+		sql += string(m.descriptor.Fields().Get(i).Name())
 	}
 	sql += " FROM "
 	sql += m.tableName
@@ -372,7 +384,7 @@ func (m *Message2MysqlSql) GetSelectSqlWithWhereClause(whereClause string) strin
 		} else {
 			needComma = true
 		}
-		sql += m.descriptor.Fields().Get(i).Name()
+		sql += string(m.descriptor.Fields().Get(i).Name())
 	}
 	sql += " FROM "
 	sql += m.tableName
@@ -391,7 +403,7 @@ func (m *Message2MysqlSql) GetSelectAllSql() string {
 		} else {
 			needComma = true
 		}
-		sql += m.descriptor.Fields().Get(i).Name()
+		sql += string(m.descriptor.Fields().Get(i).Name())
 	}
 	sql += " FROM "
 	sql += m.tableName
@@ -407,7 +419,7 @@ func (m *Message2MysqlSql) GetSelectAllSqlWithWhereClause(whereClause string) st
 		} else {
 			needComma = true
 		}
-		sql += m.descriptor.Fields().Get(i).Name()
+		sql += string(m.descriptor.Fields().Get(i).Name())
 	}
 	sql += " FROM "
 	sql += m.tableName
@@ -422,7 +434,7 @@ func (m *Message2MysqlSql) GetDeleteSql(message proto.Message, db *sql.DB) strin
 	sql += " FROM "
 	sql += m.tableName
 	sql += " WHERE "
-	sql += m.descriptor.Fields().Get(kPrimaryKeyIndex).Name()
+	sql += string(m.descriptor.Fields().Get(kPrimaryKeyIndex).Name())
 	value := ConvertFieldValue(message, m.primaryKeyField, db)
 	sql += " = '"
 	sql += value
@@ -449,7 +461,7 @@ func (m *Message2MysqlSql) GetReplaceSql(message proto.Message, db *sql.DB) stri
 		} else {
 			needComma = true
 		}
-		sql += m.descriptor.Fields().Get(i).Name()
+		sql += string(m.descriptor.Fields().Get(i).Name())
 	}
 	sql += ") VALUES ("
 	needComma = false
