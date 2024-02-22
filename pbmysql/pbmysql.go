@@ -27,10 +27,10 @@ func EscapeString(str string, db *sql.DB) string {
 }
 
 type MessageTableInfo struct {
+	tableName         string
 	defaultInstance   proto.Message
-	descriptor        *descriptorpb.DescriptorProto
-	options           proto.Message
-	primaryKeyField   *descriptorpb.DescriptorProto
+	options           descriptorpb.MessageOptions
+	primaryKeyField   protoreflect.FieldDescriptor
 	autoIncrement     uint64
 	fields            map[int]string
 	primaryKey        []string
@@ -39,6 +39,7 @@ type MessageTableInfo struct {
 	foreignKeys       string
 	foreignReferences string
 	autoIncreaseKey   string
+	descriptor        protoreflect.MessageDescriptor
 }
 
 func (m *MessageTableInfo) SetAutoIncrement(autoIncrement uint64) {
@@ -52,7 +53,7 @@ func (m *MessageTableInfo) DefaultInstance() proto.Message {
 // Other methods like GetCreateTableSql, GetInsertSql, etc. should be implemented here.
 
 type Pb2DbTables struct {
-	tables map[string]MessageTableInfo
+	tables map[string]*MessageTableInfo
 	mysql  *sql.DB
 }
 
@@ -194,28 +195,15 @@ func ConvertFieldValue(message proto.Message, fieldDesc protoreflect.FieldDescri
 	return fieldValue
 }
 
-type Message2MysqlSql struct {
-	tableName         string
-	options           descriptorpb.MessageOptions
-	primaryKey        []string
-	indexes           []string
-	uniqueKeys        []string
-	autoIncreaseKey   string
-	foreignKeys       string
-	foreignReferences string
-	descriptor        protoreflect.MessageDescriptor
-	primaryKeyField   protoreflect.FieldDescriptor
-}
-
-func NewMessage2MysqlSql(tableName string, options descriptorpb.MessageOptions, descriptor protoreflect.MessageDescriptor) *Message2MysqlSql {
-	return &Message2MysqlSql{
+func NewMessage2MysqlSql(tableName string, options descriptorpb.MessageOptions, descriptor protoreflect.MessageDescriptor) *MessageTableInfo {
+	return &MessageTableInfo{
 		tableName:  tableName,
 		options:    options,
 		descriptor: descriptor,
 	}
 }
 
-func (m *Message2MysqlSql) GetCreateTableSql() string {
+func (m *MessageTableInfo) GetCreateTableSql() string {
 	sql := "CREATE TABLE IF NOT EXISTS " + m.tableName
 
 	//descriptorpb.MessageOptions.ProtoReflect.Descriptor.ExtensionRanges
@@ -284,7 +272,7 @@ func (m *Message2MysqlSql) GetCreateTableSql() string {
 	return sql
 }
 
-func (m *Message2MysqlSql) GetAlterTableAddFieldSql() string {
+func (m *MessageTableInfo) GetAlterTableAddFieldSql() string {
 	if m.descriptor.Fields().Len() == len(m.primaryKey) {
 		return ""
 	}
@@ -309,7 +297,7 @@ func (m *Message2MysqlSql) GetAlterTableAddFieldSql() string {
 	return sql
 }
 
-func (m *Message2MysqlSql) GetInsertSql(message proto.Message, db *sql.DB) string {
+func (m *MessageTableInfo) GetInsertSql(message proto.Message, db *sql.DB) string {
 	sql := "INSERT INTO " + m.tableName
 	sql += " ("
 	needComma := false
@@ -337,14 +325,14 @@ func (m *Message2MysqlSql) GetInsertSql(message proto.Message, db *sql.DB) strin
 	return sql
 }
 
-func (m *Message2MysqlSql) GetInsertOnDupUpdateSql(message proto.Message, db *sql.DB) string {
+func (m *MessageTableInfo) GetInsertOnDupUpdateSql(message proto.Message, db *sql.DB) string {
 	sql := m.GetInsertSql(message, db)
 	sql += " ON DUPLICATE KEY UPDATE "
 	sql += m.GetUpdateSet(message, db)
 	return sql
 }
 
-func (m *Message2MysqlSql) GetInsertOnDupKeyForPrimaryKey(message proto.Message, db *sql.DB) string {
+func (m *MessageTableInfo) GetInsertOnDupKeyForPrimaryKey(message proto.Message, db *sql.DB) string {
 	sql := m.GetInsertSql(message, db)
 	sql += " ON DUPLICATE KEY UPDATE "
 	sql += " " + string(m.primaryKeyField.Name())
@@ -354,7 +342,7 @@ func (m *Message2MysqlSql) GetInsertOnDupKeyForPrimaryKey(message proto.Message,
 	return sql
 }
 
-func (m *Message2MysqlSql) GetSelectSql(key, val string) string {
+func (m *MessageTableInfo) GetSelectSql(key, val string) string {
 	sql := "SELECT "
 	needComma := false
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
@@ -375,7 +363,7 @@ func (m *Message2MysqlSql) GetSelectSql(key, val string) string {
 	return sql
 }
 
-func (m *Message2MysqlSql) GetSelectSqlWithWhereClause(whereClause string) string {
+func (m *MessageTableInfo) GetSelectSqlWithWhereClause(whereClause string) string {
 	sql := "SELECT "
 	needComma := false
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
@@ -394,7 +382,7 @@ func (m *Message2MysqlSql) GetSelectSqlWithWhereClause(whereClause string) strin
 	return sql
 }
 
-func (m *Message2MysqlSql) GetSelectAllSql() string {
+func (m *MessageTableInfo) GetSelectAllSql() string {
 	sql := "SELECT "
 	needComma := false
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
@@ -410,7 +398,7 @@ func (m *Message2MysqlSql) GetSelectAllSql() string {
 	return sql
 }
 
-func (m *Message2MysqlSql) GetSelectAllSqlWithWhereClause(whereClause string) string {
+func (m *MessageTableInfo) GetSelectAllSqlWithWhereClause(whereClause string) string {
 	sql := "SELECT "
 	needComma := false
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
@@ -429,7 +417,7 @@ func (m *Message2MysqlSql) GetSelectAllSqlWithWhereClause(whereClause string) st
 	return sql
 }
 
-func (m *Message2MysqlSql) GetDeleteSql(message proto.Message, db *sql.DB) string {
+func (m *MessageTableInfo) GetDeleteSql(message proto.Message, db *sql.DB) string {
 	sql := "DELETE "
 	sql += " FROM "
 	sql += m.tableName
@@ -442,7 +430,7 @@ func (m *Message2MysqlSql) GetDeleteSql(message proto.Message, db *sql.DB) strin
 	return sql
 }
 
-func (m *Message2MysqlSql) GetDeleteSqlWithWhereClause(whereClause string, db *sql.DB) string {
+func (m *MessageTableInfo) GetDeleteSqlWithWhereClause(whereClause string, db *sql.DB) string {
 	sql := "DELETE "
 	sql += " FROM "
 	sql += m.tableName
@@ -451,7 +439,7 @@ func (m *Message2MysqlSql) GetDeleteSqlWithWhereClause(whereClause string, db *s
 	return sql
 }
 
-func (m *Message2MysqlSql) GetReplaceSql(message proto.Message, db *sql.DB) string {
+func (m *MessageTableInfo) GetReplaceSql(message proto.Message, db *sql.DB) string {
 	sql := "REPLACE INTO " + m.tableName
 	sql += " ("
 	needComma := false
@@ -479,10 +467,10 @@ func (m *Message2MysqlSql) GetReplaceSql(message proto.Message, db *sql.DB) stri
 	return sql
 }
 
-func (m *Message2MysqlSql) GetUpdateSet(message proto.Message, db *sql.DB) string {
+func (m *MessageTableInfo) GetUpdateSet(message proto.Message, db *sql.DB) string {
 	sql := ""
 	needComma := false
-	reflection := message.ProtoReflect()
+	reflection := proto.MessageReflect(message)
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
 		field := m.descriptor.Fields().Get(i)
 		if reflection.Has(field) {
@@ -491,7 +479,7 @@ func (m *Message2MysqlSql) GetUpdateSet(message proto.Message, db *sql.DB) strin
 			} else {
 				needComma = true
 			}
-			sql += " " + field.Name()
+			sql += " " + string(field.Name())
 			value := ConvertFieldValue(message, field, db)
 			sql += "="
 			sql += "'" + value + "'"
@@ -500,7 +488,7 @@ func (m *Message2MysqlSql) GetUpdateSet(message proto.Message, db *sql.DB) strin
 	return sql
 }
 
-func (m *Message2MysqlSql) GetUpdateSql(message proto.Message, db *sql.DB) string {
+func (m *MessageTableInfo) GetUpdateSql(message proto.Message, db *sql.DB) string {
 	sql := "UPDATE " + m.tableName
 	needComma := false
 	sql += " SET "
@@ -508,8 +496,8 @@ func (m *Message2MysqlSql) GetUpdateSql(message proto.Message, db *sql.DB) strin
 	sql += " WHERE "
 	needComma = false
 	for _, primaryKey := range m.primaryKey {
-		field := m.descriptor.Fields().ByName(primaryKey)
-		if reflection.Has(field) {
+		field := m.descriptor.Fields().ByName(protoreflect.Name(primaryKey))
+		if nil != field {
 			if needComma {
 				sql += " AND "
 			} else {
@@ -525,7 +513,7 @@ func (m *Message2MysqlSql) GetUpdateSql(message proto.Message, db *sql.DB) strin
 	return sql
 }
 
-func (m *Message2MysqlSql) GetUpdateSqlWithWhereClause(message proto.Message, db *sql.DB, whereClause string) string {
+func (m *MessageTableInfo) GetUpdateSqlWithWhereClause(message proto.Message, db *sql.DB, whereClause string) string {
 	sql := "UPDATE " + m.tableName
 	needComma := false
 	sql += " SET "
@@ -535,7 +523,7 @@ func (m *Message2MysqlSql) GetUpdateSqlWithWhereClause(message proto.Message, db
 		} else {
 			needComma = true
 		}
-		sql += " " + m.descriptor.Fields().Get(i).Name()
+		sql += " " + string(m.descriptor.Fields().Get(i).Name())
 		fieldDesc := m.descriptor.Fields().Get(i)
 		value := ConvertFieldValue(message, fieldDesc, db)
 		sql += "="
@@ -550,45 +538,41 @@ func (m *Message2MysqlSql) GetUpdateSqlWithWhereClause(message proto.Message, db
 	return sql
 }
 
-func (m *Message2MysqlSql) GetTruncateSql(message proto.Message) string {
-	sql := "Truncate " + message.ProtoReflect().Descriptor().FullName()
-	return sql
+func (m *MessageTableInfo) GetTruncateSql(message proto.Message) string {
+	reflection := proto.MessageReflect(message)
+	return "Truncate " + string(reflection.Descriptor().FullName())
 }
 
-func (m *Message2MysqlSql) GetSelectColumn() string {
+func (m *MessageTableInfo) GetSelectColumn() string {
 	return fmt.Sprintf("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '%s';", m.tableName)
 }
 
 func NewPb2DbTables() *Pb2DbTables {
 	return &Pb2DbTables{
-		tables: make(map[string]*Message2MysqlSql),
+		tables: make(map[string]*MessageTableInfo),
 	}
 }
 
-func (p *Pb2DbTables) SetAutoIncrement(message proto.Message, autoIncrement uint64) {
-	tableName := message.ProtoReflect().Descriptor().FullName()
-	if table, ok := p.tables[tableName]; ok {
-		table.autoIncreaseKey = autoIncrement
-	}
+func GetTableName(m proto.Message) string {
+	reflection := proto.MessageReflect(m)
+	return string(reflection.Descriptor().FullName())
 }
 
 func (p *Pb2DbTables) GetCreateTableSql(message proto.Message) string {
-	tableName := message.ProtoReflect().Descriptor().FullName()
-	if table, ok := p.tables[tableName]; ok {
+	if table, ok := p.tables[GetTableName(message)]; ok {
 		return table.GetCreateTableSql()
 	}
 	return ""
 }
 
 func (p *Pb2DbTables) GetAlterTableAddFieldSql(message proto.Message) string {
-	tableName := message.ProtoReflect().Descriptor().FullName()
-	if table, ok := p.tables[tableName]; ok {
+	if table, ok := p.tables[GetTableName(message)]; ok {
 		return table.GetAlterTableAddFieldSql()
 	}
 	return ""
 }
 
-func (p *Pb2DbTables) RegisterTable(tableName string, options *Options, descriptor protoreflect.MessageDescriptor) {
+func (p *Pb2DbTables) RegisterTable(tableName string, options descriptorpb.MessageOptions, descriptor protoreflect.MessageDescriptor) {
 	p.tables[tableName] = NewMessage2MysqlSql(tableName, options, descriptor)
 }
 
