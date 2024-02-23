@@ -1,10 +1,11 @@
 package main
 
 import (
-	"pbmysql-go/pbmysql"
+	"pbmysql-go/dbproto"
+	pbmysql_go "pbmysql-go/pbmysql"
 )
 
 func main() {
-	var msg2mysql pbmysql_go.Pb2DbTables
-	//pbmysql_go.SetAutoIncrement(&msg2mysql)
+	pbmsyqltablelist := pbmysql_go.NewPb2DbTables()
+	pbmsyqltablelist.CreateMysqlTable(&dbproto.GolangTest{})
 }

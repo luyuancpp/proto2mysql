@@ -1,0 +1,16 @@
+syntax = "proto3";
+import "db_base.proto";
+
+option go_package = "./;dbproto";
+
+
+message golang_test
+{
+  option(OptionTableName)  = "golang_test";
+  option(OptionPrimaryKey) = "id";
+  option(OptionAutoIncrementKey) = "id";
+  uint32 id = 1;
+  string ip = 2;
+  uint32 port = 3;
+  uint32 group_id = 4;
+}

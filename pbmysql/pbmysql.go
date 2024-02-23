@@ -195,14 +195,6 @@ func ConvertFieldValue(message proto.Message, fieldDesc protoreflect.FieldDescri
 	return fieldValue
 }
 
-func NewMessage2MysqlSql(tableName string, options descriptorpb.MessageOptions, descriptor protoreflect.MessageDescriptor) *MessageTableInfo {
-	return &MessageTableInfo{
-		tableName:  tableName,
-		options:    options,
-		descriptor: descriptor,
-	}
-}
-
 func (m *MessageTableInfo) GetCreateTableSql() string {
 	sql := "CREATE TABLE IF NOT EXISTS " + m.tableName
 
@@ -572,8 +564,8 @@ func (p *Pb2DbTables) GetAlterTableAddFieldSql(message proto.Message) string {
 	return ""
 }
 
-func (p *Pb2DbTables) RegisterTable(tableName string, options descriptorpb.MessageOptions, descriptor protoreflect.MessageDescriptor) {
-	p.tables[tableName] = NewMessage2MysqlSql(tableName, options, descriptor)
+func (p *Pb2DbTables) CreateMysqlTable(m proto.Message) {
+	p.tables[GetTableName(m)] = &MessageTableInfo{defaultInstance: m}
 }
 
 // FillMessageField and other helper functions should be implemented here.
