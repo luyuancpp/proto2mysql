@@ -271,7 +271,7 @@ func (m *MessageTableInfo) GetAlterTableAddFieldSql() string {
 	sql := "ALTER TABLE " + m.tableName
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
 		field := m.descriptor.Fields().Get(i)
-		if m.primaryKey[i] != "" {
+		if m.descriptor.Fields().ByName(field.Name()) != nil {
 			continue
 		}
 		sql += " ADD COLUMN "

@@ -3,6 +3,10 @@ import "db_base.proto";
 
 option go_package = "./;dbproto";
 
+message player
+{
+  uint64 player_id = 1;
+}
 
 message golang_test
 {
@@ -13,4 +17,5 @@ message golang_test
   string ip = 2;
   uint32 port = 3;
   uint32 group_id = 4;
+  player player = 5;
 }
