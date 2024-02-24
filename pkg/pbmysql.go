@@ -7,7 +7,6 @@ import (
 	"github.com/golang/protobuf/proto"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/types/descriptorpb"
 	"pbmysql-go/dbproto"
 	"strconv"
 	"strings"
@@ -29,13 +28,13 @@ func EscapeString(str string, db *sql.DB) string {
 type MessageTableInfo struct {
 	tableName         string
 	defaultInstance   proto.Message
-	options           descriptorpb.MessageOptions
+	options           protoreflect.Message
 	primaryKeyField   protoreflect.FieldDescriptor
 	autoIncrement     uint64
 	fields            map[int]string
 	primaryKey        []string
 	indexes           []string
-	uniqueKeys        []string
+	uniqueKeys        string
 	foreignKeys       string
 	foreignReferences string
 	autoIncreaseKey   string
@@ -198,26 +197,20 @@ func ConvertFieldValue(message proto.Message, fieldDesc protoreflect.FieldDescri
 func (m *MessageTableInfo) GetCreateTableSql() string {
 	sql := "CREATE TABLE IF NOT EXISTS " + m.tableName
 
-	//descriptorpb.MessageOptions.ProtoReflect.Descriptor.ExtensionRanges
-	primaryKeyExtName := dbproto.E_OptionPrimaryKey.TypeDescriptor().Name()
-	primaryKeyExtField := m.descriptor.Extensions().ByName(primaryKeyExtName)
-	if primaryKeyExtField != nil {
-		m.primaryKey = strings.Split(string(primaryKeyExtField.FullName()), ",")
+	if m.options.Has(dbproto.E_OptionPrimaryKey.TypeDescriptor()) {
+		v := m.options.Get(dbproto.E_OptionPrimaryKey.TypeDescriptor())
+		m.primaryKey = strings.Split(v.String(), ",")
 	}
-	optionIndexKeyExtName := dbproto.E_OptionIndex.TypeDescriptor().Name()
-	optionIndexKeyExtField := m.descriptor.Extensions().ByName(optionIndexKeyExtName)
-	if optionIndexKeyExtField != nil {
-		m.indexes = strings.Split(string(optionIndexKeyExtField.FullName()), ",")
+	if m.options.Has(dbproto.E_OptionIndex.TypeDescriptor()) {
+		v := m.options.Get(dbproto.E_OptionPrimaryKey.TypeDescriptor())
+		m.indexes = strings.Split(v.String(), ",")
 	}
-	optionUniqueKeyExtName := dbproto.E_OptionUniqueKey.TypeDescriptor().Name()
-	optionUniqueKeyExtField := m.descriptor.Extensions().ByName(optionUniqueKeyExtName)
-	if optionUniqueKeyExtField != nil {
-		m.uniqueKeys = strings.Split(string(optionUniqueKeyExtField.FullName()), ",")
+	if m.options.Has(dbproto.E_OptionUniqueKey.TypeDescriptor()) {
+		m.uniqueKeys = m.options.Get(dbproto.E_OptionUniqueKey.TypeDescriptor()).String()
 	}
-	m.autoIncreaseKey = string(m.descriptor.Extensions().ByName(dbproto.E_OptionAutoIncrementKey.TypeDescriptor().Name()).FullName())
-
-	m.foreignKeys = string(m.descriptor.Extensions().ByName(dbproto.E_OptionForeignKey.TypeDescriptor().Name()).FullName())
-	m.foreignReferences = string(m.descriptor.Extensions().ByName(dbproto.E_OptionForeignReferences.TypeDescriptor().Name()).FullName())
+	m.autoIncreaseKey = m.options.Get(dbproto.E_OptionAutoIncrementKey.TypeDescriptor()).String()
+	m.foreignKeys = m.options.Get(dbproto.E_OptionForeignKey.TypeDescriptor()).String()
+	m.foreignReferences = m.options.Get(dbproto.E_OptionForeignReferences.TypeDescriptor()).String()
 	sql += " ("
 	needComma := false
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
@@ -238,7 +231,7 @@ func (m *MessageTableInfo) GetCreateTableSql() string {
 		}
 	}
 	sql += ", PRIMARY KEY ("
-	sql += string(primaryKeyExtField.Name())
+	sql += string(m.primaryKey[kPrimaryKeyIndex])
 	sql += ")"
 	if m.foreignKeys != "" && m.foreignReferences != "" {
 		sql += ", FOREIGN KEY ("
@@ -249,7 +242,7 @@ func (m *MessageTableInfo) GetCreateTableSql() string {
 	}
 	if len(m.uniqueKeys) > 0 {
 		sql += ", UNIQUE KEY ("
-		sql += string(optionUniqueKeyExtField.Name())
+		sql += m.uniqueKeys
 		sql += ")"
 	}
 	for _, index := range m.indexes {
@@ -550,6 +543,11 @@ func GetTableName(m proto.Message) string {
 	return string(reflection.Descriptor().FullName())
 }
 
+func GetDescriptor(m proto.Message) protoreflect.MessageDescriptor {
+	reflection := proto.MessageReflect(m)
+	return reflection.Descriptor()
+}
+
 func (p *Pb2DbTables) GetCreateTableSql(message proto.Message) string {
 	if table, ok := p.tables[GetTableName(message)]; ok {
 		return table.GetCreateTableSql()
@@ -565,7 +563,11 @@ func (p *Pb2DbTables) GetAlterTableAddFieldSql(message proto.Message) string {
 }
 
 func (p *Pb2DbTables) CreateMysqlTable(m proto.Message) {
-	p.tables[GetTableName(m)] = &MessageTableInfo{defaultInstance: m}
+	p.tables[GetTableName(m)] = &MessageTableInfo{
+		tableName:       GetTableName(m),
+		defaultInstance: m,
+		descriptor:      GetDescriptor(m),
+		options:         GetDescriptor(m).Options().ProtoReflect()}
 }
 
 // FillMessageField and other helper functions should be implemented here.
