@@ -149,18 +149,25 @@ func FillMessageField(message proto.Message, row []string) {
 	}
 }
 
-var tableNameDescriptor = []string{
+var MysqlFieldDescriptorType = []string{
 	"",
-	"int NOT NULL",
-	"bigint NOT NULL",
-	"int unsigned NOT NULL",
-	"bigint unsigned NOT NULL",
 	"double NOT NULL DEFAULT '0'",
 	"float NOT NULL DEFAULT '0'",
-	"bool",
+	"bigint NOT NULL",
+	"bigint unsigned NOT NULL",
 	"int NOT NULL",
+	"bigint NOT NULL",
+	"int NOT NULL",
+	"bool",
 	"varchar(256)",
 	"Blob",
+	"Blob",
+	"Blob",
+	"int unsigned NOT NULL",
+	"int NOT NULL",
+	"bigint NOT NULL",
+	"int NOT NULL",
+	"bigint NOT NULL",
 }
 
 func ConvertFieldValue(message proto.Message, fieldDesc protoreflect.FieldDescriptor, db *sql.DB) string {
@@ -222,7 +229,7 @@ func (m *MessageTableInfo) GetCreateTableSql() string {
 		}
 		sql += string(field.Name())
 		sql += " "
-		sql += tableNameDescriptor[field.Kind()]
+		sql += MysqlFieldDescriptorType[field.Kind()]
 		if i == kPrimaryKeyIndex {
 			sql += " NOT NULL"
 		}
@@ -270,7 +277,7 @@ func (m *MessageTableInfo) GetAlterTableAddFieldSql() string {
 		sql += " ADD COLUMN "
 		sql += string(field.Name())
 		sql += " "
-		sql += tableNameDescriptor[field.Kind()]
+		sql += MysqlFieldDescriptorType[field.Kind()]
 		if i+1 < m.descriptor.Fields().Len() {
 			sql += ","
 		}
