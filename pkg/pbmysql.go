@@ -1,4 +1,4 @@
-package pbmysql_go
+package pkb
 
 import (
 	"database/sql"
