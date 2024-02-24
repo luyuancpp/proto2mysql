@@ -1,11 +1,13 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
+	"github.com/go-sql-driver/mysql"
 	"os"
 	"pbmysql-go/dbproto"
-	pbmysql_go "pbmysql-go/pkg"
+	pkg "pbmysql-go/pkg"
 )
 
 func main() {
@@ -16,15 +18,23 @@ func main() {
 		fmt.Println(err)
 		return
 	}
-	pbmsyqltablelist := pbmysql_go.NewPb2DbTables()
-	pbmsyqltablelist.CreateMysqlTable(&dbproto.GolangTest{})
+	pbMySqlTableList := pkg.NewPb2DbTables()
+	pbMySqlTableList.CreateMysqlTable(&dbproto.GolangTest{})
 
 	decoder := json.NewDecoder(file)
-	jsonCofig := pbmysql_go.JsonConfig{}
-	err = decoder.Decode(&jsonCofig)
+	jsonConfig := pkg.JsonConfig{}
+	err = decoder.Decode(&jsonConfig)
 	if err != nil {
 		fmt.Println(err)
 		return
 	}
 
+	conn, err := mysql.NewConnector(pkg.NewMysqlConfig(jsonConfig))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	db := sql.OpenDB(conn)
+	defer db.Close()
+	db.Exec(pbMySqlTableList.GetCreateTableSql(&dbproto.GolangTest{}))
 }
