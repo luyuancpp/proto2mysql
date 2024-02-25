@@ -11,30 +11,36 @@ import (
 	"testing"
 )
 
-func TestCreateTable(t *testing.T) {
+func GetMysqlConfig() *mysql.Config {
 	file, err := os.Open("db.json")
 	defer file.Close()
 	if err != nil {
 		fmt.Println(err)
-		return
+		return nil
 	}
-	pbMySqlTableList := NewPb2DbTables()
-	pbMySqlTableList.CreateMysqlTable(&dbproto.GolangTest{})
-
 	decoder := json.NewDecoder(file)
 	jsonConfig := JsonConfig{}
 	err = decoder.Decode(&jsonConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
+	return NewMysqlConfig(jsonConfig)
+}
 
-	conn, err := mysql.NewConnector(NewMysqlConfig(jsonConfig))
+func TestCreateTable(t *testing.T) {
+	pbMySqlDB := NewPb2DbTables()
+	pbMySqlDB.CreateMysqlTable(&dbproto.GolangTest{})
+
+	mysqlConfig := GetMysqlConfig()
+	conn, err := mysql.NewConnector(mysqlConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
 	db := sql.OpenDB(conn)
 	defer db.Close()
-	result, err := db.Exec(pbMySqlTableList.GetCreateTableSql(&dbproto.GolangTest{}))
+	pbMySqlDB.SetDB(db, mysqlConfig.DBName)
+	pbMySqlDB.UseDB()
+	result, err := db.Exec(pbMySqlDB.GetCreateTableSql(&dbproto.GolangTest{}))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -43,29 +49,31 @@ func TestCreateTable(t *testing.T) {
 }
 
 func TestAlterTable(t *testing.T) {
-	file, err := os.Open("db.json")
-	defer file.Close()
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	pbMySqlTableList := NewPb2DbTables()
-	pbMySqlTableList.CreateMysqlTable(&dbproto.GolangTest{})
+	pbMySqlDB := NewPb2DbTables()
+	pbMySqlDB.CreateMysqlTable(&dbproto.GolangTest{})
 
-	decoder := json.NewDecoder(file)
-	jsonConfig := JsonConfig{}
-	err = decoder.Decode(&jsonConfig)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	conn, err := mysql.NewConnector(NewMysqlConfig(jsonConfig))
+	mysqlConfig := GetMysqlConfig()
+	conn, err := mysql.NewConnector(mysqlConfig)
 	if err != nil {
 		log.Fatal(err)
 	}
 	db := sql.OpenDB(conn)
+	pbMySqlDB.SetDB(db, mysqlConfig.DBName)
+	pbMySqlDB.UseDB()
+
 	defer db.Close()
-	result, err := db.Exec(pbMySqlTableList.GetAlterTableAddFieldSql(&dbproto.GolangTest{}))
+	pbMysqlTbl, ok := pbMySqlDB.Tables[GetTableName(&dbproto.GolangTest{})]
+	if !ok {
+		log.Fatal("table not found")
+		return
+	}
+	rows, err := db.Query(pbMysqlTbl.GetSelectColumn())
+	if err != nil {
+		log.Fatal(rows)
+	}
+	defer rows.Close()
+
+	result, err := db.Exec(pbMySqlDB.GetAlterTableAddFieldSql(&dbproto.GolangTest{}))
 	if err != nil {
 		fmt.Println(err)
 		return

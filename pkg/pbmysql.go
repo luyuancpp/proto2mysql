@@ -51,20 +51,26 @@ func (m *MessageTableInfo) DefaultInstance() proto.Message {
 
 // Other methods like GetCreateTableSql, GetInsertSql, etc. should be implemented here.
 
-type Pb2DbTables struct {
-	tables map[string]*MessageTableInfo
-	mysql  *sql.DB
+type PbMysqlDB struct {
+	Tables map[string]*MessageTableInfo
+	Db     *sql.DB
+	DBName string
+}
+
+func (p *PbMysqlDB) SetDB(db *sql.DB, dbname string) {
+	p.Db = db
+	p.DBName = dbname
+}
+
+func (p *PbMysqlDB) UseDB() {
+	_, err := p.Db.Query("USE " + p.DBName)
+	if err != nil {
+		fmt.Println(err)
+
+	}
 }
 
 // Other methods like GetCreateTableSql, GetInsertSql, etc. should be implemented here.
-
-func (p *Pb2DbTables) AddTable(messageDefaultInstance proto.Message) {
-	// Implementation goes here.
-}
-
-func (p *Pb2DbTables) SetMysql(mysql *sql.DB) {
-	p.mysql = mysql
-}
 
 //func EscapeString(str *string, db *sql.DB) {
 //buffer := make([]byte, len(*str)*2+1)
@@ -539,9 +545,9 @@ func (m *MessageTableInfo) GetSelectColumn() string {
 	return fmt.Sprintf("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '%s';", m.tableName)
 }
 
-func NewPb2DbTables() *Pb2DbTables {
-	return &Pb2DbTables{
-		tables: make(map[string]*MessageTableInfo),
+func NewPb2DbTables() *PbMysqlDB {
+	return &PbMysqlDB{
+		Tables: make(map[string]*MessageTableInfo),
 	}
 }
 
@@ -555,22 +561,22 @@ func GetDescriptor(m proto.Message) protoreflect.MessageDescriptor {
 	return reflection.Descriptor()
 }
 
-func (p *Pb2DbTables) GetCreateTableSql(message proto.Message) string {
-	if table, ok := p.tables[GetTableName(message)]; ok {
+func (p *PbMysqlDB) GetCreateTableSql(message proto.Message) string {
+	if table, ok := p.Tables[GetTableName(message)]; ok {
 		return table.GetCreateTableSql()
 	}
 	return ""
 }
 
-func (p *Pb2DbTables) GetAlterTableAddFieldSql(message proto.Message) string {
-	if table, ok := p.tables[GetTableName(message)]; ok {
+func (p *PbMysqlDB) GetAlterTableAddFieldSql(message proto.Message) string {
+	if table, ok := p.Tables[GetTableName(message)]; ok {
 		return table.GetAlterTableAddFieldSql()
 	}
 	return ""
 }
 
-func (p *Pb2DbTables) CreateMysqlTable(m proto.Message) {
-	p.tables[GetTableName(m)] = &MessageTableInfo{
+func (p *PbMysqlDB) CreateMysqlTable(m proto.Message) {
+	p.Tables[GetTableName(m)] = &MessageTableInfo{
 		tableName:       GetTableName(m),
 		defaultInstance: m,
 		descriptor:      GetDescriptor(m),
