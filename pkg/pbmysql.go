@@ -91,7 +91,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 	return fieldValue
 }
 
-func ParseFieldFromString(message proto.Message, row []string) {
+func FillFieldMessage(message proto.Message, row []string) {
 	reflection := proto.MessageReflect(message)
 	dscrpt := reflection.Descriptor()
 	for i := 0; i < dscrpt.Fields().Len(); i++ {
@@ -679,6 +679,7 @@ func (p *PbMysqlDB) GetCreateTableSql(message proto.Message) string {
 func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
+		fmt.Println("table not found")
 		return
 	}
 	sqlStmt := fmt.Sprintf("SELECT COLUMN_NAME,ORDINAL_POSITION FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s';",
@@ -704,6 +705,19 @@ func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
 		table.fields[fieldIndex-1] = fieldName
 	}
 	p.Db.Exec(table.GetAlterTableAddFieldSql())
+}
+
+func (p *PbMysqlDB) Save(message proto.Message) {
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		fmt.Println("table not found")
+		return
+	}
+	_, err := p.Db.Exec(table.GetInsertOnDupUpdateSql(message, p.Db))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 }
 
 func (p *PbMysqlDB) CreateMysqlTable(m proto.Message) {

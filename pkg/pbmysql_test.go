@@ -65,3 +65,28 @@ func TestAlterTable(t *testing.T) {
 
 	pbMySqlDB.AlterTableAddField(&dbproto.GolangTest{})
 }
+
+func TestInsertOnDupUpdate(t *testing.T) {
+	pbMySqlDB := NewPb2DbTables()
+	pb := &dbproto.GolangTest{
+		Id:      1,
+		GroupId: 1,
+		Ip:      "127.0.0.1",
+		Port:    3306,
+		Player: &dbproto.Player{
+			PlayerId: 111,
+		},
+	}
+	pbMySqlDB.CreateMysqlTable(pb)
+	mysqlConfig := GetMysqlConfig()
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	db := sql.OpenDB(conn)
+	defer db.Close()
+	pbMySqlDB.SetDB(db, mysqlConfig.DBName)
+	pbMySqlDB.UseDB()
+
+	pbMySqlDB.Save(pb)
+}
