@@ -16,15 +16,6 @@ const (
 	kPrimaryKeyIndex = 0
 )
 
-func EscapeString(str string, db *sql.DB) string {
-	var buffer string
-	// Assuming db is a *sql.DB connected to a MySQL database.
-	// This is a simplistic way to escape a string for MySQL, proper escaping would depend on the context.
-	// For real-world applications, use parameterized queries or prepared statements to avoid SQL injection.
-	buffer = fmt.Sprintf("%q", str)
-	return buffer
-}
-
 type MessageTableInfo struct {
 	tableName         string
 	defaultInstance   proto.Message
@@ -39,6 +30,7 @@ type MessageTableInfo struct {
 	foreignReferences string
 	autoIncreaseKey   string
 	descriptor        protoreflect.MessageDescriptor
+	Db                *sql.DB
 }
 
 func (m *MessageTableInfo) SetAutoIncrement(autoIncrement uint64) {
@@ -48,8 +40,6 @@ func (m *MessageTableInfo) SetAutoIncrement(autoIncrement uint64) {
 func (m *MessageTableInfo) DefaultInstance() proto.Message {
 	return m.defaultInstance
 }
-
-// Other methods like GetCreateTableSql, GetInsertSql, etc. should be implemented here.
 
 type PbMysqlDB struct {
 	Tables map[string]*MessageTableInfo
@@ -69,14 +59,6 @@ func (p *PbMysqlDB) UseDB() {
 
 	}
 }
-
-// Other methods like GetCreateTableSql, GetInsertSql, etc. should be implemented here.
-
-//func EscapeString(str *string, db *sql.DB) {
-//buffer := make([]byte, len(*str)*2+1)
-//resultSize := db.EscapeString(buffer, []byte(*str))
-//*str = string(buffer[:resultSize])
-//}
 
 func FillMessageField(message proto.Message, row []string) {
 	reflection := proto.MessageReflect(message)
@@ -535,11 +517,6 @@ func (m *MessageTableInfo) GetUpdateSqlWithWhereClause(message proto.Message, db
 	return sql
 }
 
-func (m *MessageTableInfo) GetTruncateSql(message proto.Message) string {
-	reflection := proto.MessageReflect(message)
-	return "Truncate " + string(reflection.Descriptor().FullName())
-}
-
 func NewPb2DbTables() *PbMysqlDB {
 	return &PbMysqlDB{
 		Tables: make(map[string]*MessageTableInfo),
@@ -557,10 +534,11 @@ func GetDescriptor(m proto.Message) protoreflect.MessageDescriptor {
 }
 
 func (p *PbMysqlDB) GetCreateTableSql(message proto.Message) string {
-	if table, ok := p.Tables[GetTableName(message)]; ok {
-		return table.GetCreateTableSql()
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		return ""
 	}
-	return ""
+	return table.GetCreateTableSql()
 }
 
 func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
@@ -601,5 +579,3 @@ func (p *PbMysqlDB) CreateMysqlTable(m proto.Message) {
 		options:         GetDescriptor(m).Options().ProtoReflect(),
 		fields:          make(map[int]string)}
 }
-
-// FillMessageField and other helper functions should be implemented here.
