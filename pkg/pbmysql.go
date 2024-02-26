@@ -60,7 +60,38 @@ func (p *PbMysqlDB) UseDB() {
 	}
 }
 
-func FillMessageField(message proto.Message, row []string) {
+func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor, db *sql.DB) string {
+	reflection := proto.MessageReflect(message)
+	fieldValue := ""
+	switch fieldDesc.Kind() {
+	case protoreflect.Int32Kind:
+		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Int())
+	case protoreflect.Uint32Kind:
+		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint())
+	case protoreflect.FloatKind:
+		fieldValue = fmt.Sprintf("%f", reflection.Get(fieldDesc).Float())
+	case protoreflect.StringKind:
+		fieldValue = reflection.Get(fieldDesc).String()
+	case protoreflect.Int64Kind:
+		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Int())
+	case protoreflect.Uint64Kind:
+		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint())
+	case protoreflect.DoubleKind:
+		fieldValue = fmt.Sprintf("%f", reflection.Get(fieldDesc).Float())
+	case protoreflect.BoolKind:
+		fieldValue = fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool())
+	case protoreflect.MessageKind:
+		if reflection.Has(fieldDesc) {
+			subMessage := reflection.Get(fieldDesc).Message()
+			data, _ := proto.Marshal(proto.MessageV1(subMessage))
+			var buf []byte
+			fieldValue = string(EscapeBytesBackslash(buf, data))
+		}
+	}
+	return fieldValue
+}
+
+func ParseFieldFromString(message proto.Message, row []string) {
 	reflection := proto.MessageReflect(message)
 	dscrpt := reflection.Descriptor()
 	for i := 0; i < dscrpt.Fields().Len(); i++ {
@@ -293,37 +324,6 @@ func EscapeStringQuotes(buf []byte, v string) []byte {
 	return buf[:pos]
 }
 
-func ConvertFieldValue(message proto.Message, fieldDesc protoreflect.FieldDescriptor, db *sql.DB) string {
-	reflection := proto.MessageReflect(message)
-	fieldValue := ""
-	switch fieldDesc.Kind() {
-	case protoreflect.Int32Kind:
-		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Int())
-	case protoreflect.Uint32Kind:
-		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint())
-	case protoreflect.FloatKind:
-		fieldValue = fmt.Sprintf("%f", reflection.Get(fieldDesc).Float())
-	case protoreflect.StringKind:
-		fieldValue = reflection.Get(fieldDesc).String()
-	case protoreflect.Int64Kind:
-		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Int())
-	case protoreflect.Uint64Kind:
-		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint())
-	case protoreflect.DoubleKind:
-		fieldValue = fmt.Sprintf("%f", reflection.Get(fieldDesc).Float())
-	case protoreflect.BoolKind:
-		fieldValue = fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool())
-	case protoreflect.MessageKind:
-		if reflection.Has(fieldDesc) {
-			subMessage := reflection.Get(fieldDesc).Message()
-			data, _ := proto.Marshal(proto.MessageV1(subMessage))
-			var buf []byte
-			fieldValue = string(EscapeBytesBackslash(buf, data))
-		}
-	}
-	return fieldValue
-}
-
 func (m *MessageTableInfo) GetCreateTableSql() string {
 	sql := "CREATE TABLE IF NOT EXISTS " + m.tableName
 
@@ -432,7 +432,7 @@ func (m *MessageTableInfo) GetInsertSql(message proto.Message, db *sql.DB) strin
 			needComma = true
 		}
 		fieldDesc := m.descriptor.Fields().Get(i)
-		value := ConvertFieldValue(message, fieldDesc, db)
+		value := SerializeFieldAsString(message, fieldDesc, db)
 		sql += "'" + value + "'"
 	}
 	sql += ")"
@@ -450,7 +450,7 @@ func (m *MessageTableInfo) GetInsertOnDupKeyForPrimaryKey(message proto.Message,
 	sql := m.GetInsertSql(message, db)
 	sql += " ON DUPLICATE KEY UPDATE "
 	sql += " " + string(m.primaryKeyField.Name())
-	value := ConvertFieldValue(message, m.primaryKeyField, db)
+	value := SerializeFieldAsString(message, m.primaryKeyField, db)
 	sql += "="
 	sql += "'" + value + "';"
 	return sql
@@ -537,7 +537,7 @@ func (m *MessageTableInfo) GetDeleteSql(message proto.Message, db *sql.DB) strin
 	sql += m.tableName
 	sql += " WHERE "
 	sql += string(m.descriptor.Fields().Get(kPrimaryKeyIndex).Name())
-	value := ConvertFieldValue(message, m.primaryKeyField, db)
+	value := SerializeFieldAsString(message, m.primaryKeyField, db)
 	sql += " = '"
 	sql += value
 	sql += "'"
@@ -574,7 +574,7 @@ func (m *MessageTableInfo) GetReplaceSql(message proto.Message, db *sql.DB) stri
 			needComma = true
 		}
 		fieldDesc := m.descriptor.Fields().Get(i)
-		value := ConvertFieldValue(message, fieldDesc, db)
+		value := SerializeFieldAsString(message, fieldDesc, db)
 		sql += "'" + value + "'"
 	}
 	sql += ")"
@@ -594,7 +594,7 @@ func (m *MessageTableInfo) GetUpdateSet(message proto.Message, db *sql.DB) strin
 				needComma = true
 			}
 			sql += " " + string(field.Name())
-			value := ConvertFieldValue(message, field, db)
+			value := SerializeFieldAsString(message, field, db)
 			sql += "="
 			sql += "'" + value + "'"
 		}
@@ -618,7 +618,7 @@ func (m *MessageTableInfo) GetUpdateSql(message proto.Message, db *sql.DB) strin
 				needComma = true
 			}
 			sql += primaryKey
-			value := ConvertFieldValue(message, field, db)
+			value := SerializeFieldAsString(message, field, db)
 			sql += "='"
 			sql += value
 			sql += "'"
@@ -639,7 +639,7 @@ func (m *MessageTableInfo) GetUpdateSqlWithWhereClause(message proto.Message, db
 		}
 		sql += " " + string(m.descriptor.Fields().Get(i).Name())
 		fieldDesc := m.descriptor.Fields().Get(i)
-		value := ConvertFieldValue(message, fieldDesc, db)
+		value := SerializeFieldAsString(message, fieldDesc, db)
 		sql += "="
 		sql += "'" + value + "'"
 	}
