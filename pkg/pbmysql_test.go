@@ -62,21 +62,6 @@ func TestAlterTable(t *testing.T) {
 	pbMySqlDB.UseDB()
 
 	defer db.Close()
-	pbMysqlTbl, ok := pbMySqlDB.Tables[GetTableName(&dbproto.GolangTest{})]
-	if !ok {
-		log.Fatal("table not found")
-		return
-	}
-	rows, err := db.Query(pbMysqlTbl.GetSelectColumn())
-	if err != nil {
-		log.Fatal(rows)
-	}
-	defer rows.Close()
 
-	result, err := db.Exec(pbMySqlDB.GetAlterTableAddFieldSql(&dbproto.GolangTest{}))
-	if err != nil {
-		fmt.Println(err)
-		return
-	}
-	fmt.Println(result)
+	pbMySqlDB.AlterTableAddField(&dbproto.GolangTest{})
 }

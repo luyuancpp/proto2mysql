@@ -541,10 +541,6 @@ func (m *MessageTableInfo) GetTruncateSql(message proto.Message) string {
 	return "Truncate " + string(reflection.Descriptor().FullName())
 }
 
-func (m *MessageTableInfo) GetSelectColumn() string {
-	return fmt.Sprintf("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '%s';", m.tableName)
-}
-
 func NewPb2DbTables() *PbMysqlDB {
 	return &PbMysqlDB{
 		Tables: make(map[string]*MessageTableInfo),
@@ -568,11 +564,37 @@ func (p *PbMysqlDB) GetCreateTableSql(message proto.Message) string {
 	return ""
 }
 
-func (p *PbMysqlDB) GetAlterTableAddFieldSql(message proto.Message) string {
-	if table, ok := p.Tables[GetTableName(message)]; ok {
-		return table.GetAlterTableAddFieldSql()
+func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		return
 	}
-	return ""
+	sqlStmt := fmt.Sprintf("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s';",
+		p.DBName,
+		table.tableName)
+
+	rows, err := p.Db.Query(sqlStmt)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer rows.Close()
+
+	fieldIndex := 0
+
+	var fieldName string
+
+	for rows.Next() {
+		err = rows.Scan(&fieldName)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		table.fields[fieldIndex] = fieldName
+	}
+
+	result, err := p.Db.Exec(table.GetAlterTableAddFieldSql())
+	fmt.Println(result)
 }
 
 func (p *PbMysqlDB) CreateMysqlTable(m proto.Message) {
@@ -580,7 +602,8 @@ func (p *PbMysqlDB) CreateMysqlTable(m proto.Message) {
 		tableName:       GetTableName(m),
 		defaultInstance: m,
 		descriptor:      GetDescriptor(m),
-		options:         GetDescriptor(m).Options().ProtoReflect()}
+		options:         GetDescriptor(m).Options().ProtoReflect(),
+		fields:          make(map[int]string)}
 }
 
 // FillMessageField and other helper functions should be implemented here.
