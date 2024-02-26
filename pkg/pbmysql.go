@@ -1,4 +1,4 @@
-package pkb
+package pkg
 
 import (
 	"database/sql"
@@ -158,6 +158,141 @@ var MysqlFieldDescriptorType = []string{
 	"bigint NOT NULL",
 }
 
+func reserveBuffer(buf []byte, appendSize int) []byte {
+	newSize := len(buf) + appendSize
+	if cap(buf) < newSize {
+		// Grow buffer exponentially
+		newBuf := make([]byte, len(buf)*2+appendSize)
+		copy(newBuf, buf)
+		buf = newBuf
+	}
+	return buf[:newSize]
+}
+
+func EscapeBytesBackslash(buf, v []byte) []byte {
+	pos := len(buf)
+	buf = reserveBuffer(buf, len(v)*2)
+
+	for _, c := range v {
+		switch c {
+		case '\x00':
+			buf[pos+1] = '0'
+			buf[pos] = '\\'
+			pos += 2
+		case '\n':
+			buf[pos+1] = 'n'
+			buf[pos] = '\\'
+			pos += 2
+		case '\r':
+			buf[pos+1] = 'r'
+			buf[pos] = '\\'
+			pos += 2
+		case '\x1a':
+			buf[pos+1] = 'Z'
+			buf[pos] = '\\'
+			pos += 2
+		case '\'':
+			buf[pos+1] = '\''
+			buf[pos] = '\\'
+			pos += 2
+		case '"':
+			buf[pos+1] = '"'
+			buf[pos] = '\\'
+			pos += 2
+		case '\\':
+			buf[pos+1] = '\\'
+			buf[pos] = '\\'
+			pos += 2
+		default:
+			buf[pos] = c
+			pos++
+		}
+	}
+
+	return buf[:pos]
+}
+
+func EscapeStringBackslash(buf []byte, v string) []byte {
+	pos := len(buf)
+	buf = reserveBuffer(buf, len(v)*2)
+
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		switch c {
+		case '\x00':
+			buf[pos+1] = '0'
+			buf[pos] = '\\'
+			pos += 2
+		case '\n':
+			buf[pos+1] = 'n'
+			buf[pos] = '\\'
+			pos += 2
+		case '\r':
+			buf[pos+1] = 'r'
+			buf[pos] = '\\'
+			pos += 2
+		case '\x1a':
+			buf[pos+1] = 'Z'
+			buf[pos] = '\\'
+			pos += 2
+		case '\'':
+			buf[pos+1] = '\''
+			buf[pos] = '\\'
+			pos += 2
+		case '"':
+			buf[pos+1] = '"'
+			buf[pos] = '\\'
+			pos += 2
+		case '\\':
+			buf[pos+1] = '\\'
+			buf[pos] = '\\'
+			pos += 2
+		default:
+			buf[pos] = c
+			pos++
+		}
+	}
+
+	return buf[:pos]
+}
+
+func EscapeBytesQuotes(buf, v []byte) []byte {
+	pos := len(buf)
+	buf = reserveBuffer(buf, len(v)*2)
+
+	for _, c := range v {
+		if c == '\'' {
+			buf[pos+1] = '\''
+			buf[pos] = '\''
+			pos += 2
+		} else {
+			buf[pos] = c
+			pos++
+		}
+	}
+
+	return buf[:pos]
+}
+
+func EscapeStringQuotes(buf []byte, v string) []byte {
+	pos := len(buf)
+	buf = reserveBuffer(buf, len(v)*2)
+
+	for i := 0; i < len(v); i++ {
+		c := v[i]
+		if c == '\'' {
+			buf[pos+1] = '\''
+			buf[pos] = '\''
+			pos += 2
+		} else {
+			buf[pos] = c
+			pos++
+		}
+	}
+
+	return buf[:pos]
+}
+
 func ConvertFieldValue(message proto.Message, fieldDesc protoreflect.FieldDescriptor, db *sql.DB) string {
 	reflection := proto.MessageReflect(message)
 	fieldValue := ""
@@ -182,10 +317,10 @@ func ConvertFieldValue(message proto.Message, fieldDesc protoreflect.FieldDescri
 		if reflection.Has(fieldDesc) {
 			subMessage := reflection.Get(fieldDesc).Message()
 			data, _ := proto.Marshal(proto.MessageV1(subMessage))
-			fieldValue = string(data)
+			var buf []byte
+			fieldValue = string(EscapeBytesBackslash(buf, data))
 		}
 	}
-	//EscapeString(&fieldValue, db)
 	return fieldValue
 }
 

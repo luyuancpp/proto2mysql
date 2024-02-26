@@ -1,4 +1,4 @@
-package pkb
+package pkg
 
 import (
 	"github.com/go-sql-driver/mysql"

@@ -1,4 +1,4 @@
-package pkb
+package pkg
 
 import (
 	"database/sql"
