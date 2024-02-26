@@ -277,7 +277,9 @@ func (m *MessageTableInfo) GetAlterTableAddFieldSql() string {
 	sql := "ALTER TABLE " + m.tableName
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
 		field := m.descriptor.Fields().Get(i)
-		if m.descriptor.Fields().ByName(field.Name()) != nil {
+		sqlFieldName, ok := m.fields[i]
+		fieldName := string(field.Name())
+		if ok && sqlFieldName == fieldName {
 			continue
 		}
 		sql += " ADD COLUMN "
@@ -287,9 +289,6 @@ func (m *MessageTableInfo) GetAlterTableAddFieldSql() string {
 		if i+1 < m.descriptor.Fields().Len() {
 			sql += ","
 		}
-	}
-	if m.primaryKeyField == nil {
-		return ""
 	}
 	sql += ";"
 	return sql
@@ -569,7 +568,7 @@ func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
 	if !ok {
 		return
 	}
-	sqlStmt := fmt.Sprintf("SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s';",
+	sqlStmt := fmt.Sprintf("SELECT COLUMN_NAME,ORDINAL_POSITION FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s';",
 		p.DBName,
 		table.tableName)
 
@@ -581,20 +580,17 @@ func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
 	defer rows.Close()
 
 	fieldIndex := 0
-
 	var fieldName string
 
 	for rows.Next() {
-		err = rows.Scan(&fieldName)
+		err = rows.Scan(&fieldName, &fieldIndex)
 		if err != nil {
 			fmt.Println(err)
 			return
 		}
-		table.fields[fieldIndex] = fieldName
+		table.fields[fieldIndex-1] = fieldName
 	}
-
-	result, err := p.Db.Exec(table.GetAlterTableAddFieldSql())
-	fmt.Println(result)
+	p.Db.Exec(table.GetAlterTableAddFieldSql())
 }
 
 func (p *PbMysqlDB) CreateMysqlTable(m proto.Message) {

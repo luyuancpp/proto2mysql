@@ -58,10 +58,10 @@ func TestAlterTable(t *testing.T) {
 		log.Fatal(err)
 	}
 	db := sql.OpenDB(conn)
+	defer db.Close()
+
 	pbMySqlDB.SetDB(db, mysqlConfig.DBName)
 	pbMySqlDB.UseDB()
-
-	defer db.Close()
 
 	pbMySqlDB.AlterTableAddField(&dbproto.GolangTest{})
 }
