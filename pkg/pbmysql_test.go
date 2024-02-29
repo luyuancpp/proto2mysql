@@ -76,6 +76,7 @@ func TestLoadSave(t *testing.T) {
 		Port:    3306,
 		Player: &dbproto.Player{
 			PlayerId: 111,
+			Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
 		},
 	}
 	pbMySqlDB.CreateMysqlTable(pbsave)
