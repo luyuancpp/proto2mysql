@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/go-sql-driver/mysql"
+	"github.com/golang/protobuf/proto"
 	"log"
 	"os"
 	"pbmysql-go/dbproto"
@@ -68,7 +69,7 @@ func TestAlterTable(t *testing.T) {
 
 func TestLoadSave(t *testing.T) {
 	pbMySqlDB := NewPb2DbTables()
-	pb := &dbproto.GolangTest{
+	pbsave := &dbproto.GolangTest{
 		Id:      1,
 		GroupId: 1,
 		Ip:      "127.0.0.1",
@@ -77,7 +78,7 @@ func TestLoadSave(t *testing.T) {
 			PlayerId: 111,
 		},
 	}
-	pbMySqlDB.CreateMysqlTable(pb)
+	pbMySqlDB.CreateMysqlTable(pbsave)
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
 	if err != nil {
@@ -88,8 +89,11 @@ func TestLoadSave(t *testing.T) {
 	pbMySqlDB.SetDB(db, mysqlConfig.DBName)
 	pbMySqlDB.UseDB()
 
-	pbMySqlDB.Save(pb)
+	pbMySqlDB.Save(pbsave)
 
-	pbload := dbproto.GolangTest{}
-	pbMySqlDB.LoadBykv(&pbload, "id", "1")
+	pbload := &dbproto.GolangTest{}
+	pbMySqlDB.LoadBykv(pbload, "id", "1")
+	if !proto.Equal(pbsave, pbload) {
+		log.Fatal("pb not equal")
+	}
 }
