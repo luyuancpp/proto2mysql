@@ -456,7 +456,7 @@ func (m *MessageTableInfo) GetInsertOnDupKeyForPrimaryKey(message proto.Message,
 	return sql
 }
 
-func (m *MessageTableInfo) GetSelectSql(key, val string) string {
+func (m *MessageTableInfo) GetSelectSql(whereType, whereVal string) string {
 	sql := "SELECT "
 	needComma := false
 	for i := 0; i < m.descriptor.Fields().Len(); i++ {
@@ -470,9 +470,9 @@ func (m *MessageTableInfo) GetSelectSql(key, val string) string {
 	sql += " FROM "
 	sql += m.tableName
 	sql += " WHERE "
-	sql += key
+	sql += whereType
 	sql += " = '"
-	sql += val
+	sql += whereVal
 	sql += "';"
 	return sql
 }
@@ -717,6 +717,40 @@ func (p *PbMysqlDB) Save(message proto.Message) {
 	if err != nil {
 		fmt.Println(err)
 		return
+	}
+}
+
+func (p *PbMysqlDB) LoadBykv(message proto.Message, whereType string, whereValue string) {
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		fmt.Println("table not found")
+		return
+	}
+	rows, err := p.Db.Query(table.GetSelectSql(whereType, whereValue))
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	columns, err := rows.Columns()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	vals := make([][]byte, len(columns))
+	scans := make([]interface{}, len(columns))
+	for k, _ := range vals {
+		scans[k] = &vals[k]
+	}
+
+	for rows.Next() {
+		rows.Scan(scans...)
+		i := 0
+		result := make([]string, len(columns))
+		for _, v := range vals {
+			result[i] = string(v)
+			i++
+		}
+		FillFieldMessage(message, columns)
 	}
 }
 

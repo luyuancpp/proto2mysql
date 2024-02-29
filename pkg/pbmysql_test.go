@@ -66,7 +66,7 @@ func TestAlterTable(t *testing.T) {
 	pbMySqlDB.AlterTableAddField(&dbproto.GolangTest{})
 }
 
-func TestInsertOnDupUpdate(t *testing.T) {
+func TestLoadSave(t *testing.T) {
 	pbMySqlDB := NewPb2DbTables()
 	pb := &dbproto.GolangTest{
 		Id:      1,
@@ -89,4 +89,7 @@ func TestInsertOnDupUpdate(t *testing.T) {
 	pbMySqlDB.UseDB()
 
 	pbMySqlDB.Save(pb)
+
+	pbload := dbproto.GolangTest{}
+	pbMySqlDB.LoadBykv(&pbload, "id", "1")
 }
