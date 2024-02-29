@@ -96,7 +96,7 @@ func FillFieldMessage(message proto.Message, row []string) {
 	dscrpt := reflection.Descriptor()
 	for i := 0; i < dscrpt.Fields().Len(); i++ {
 		fieldDesc := dscrpt.Fields().Get(int(i))
-		field := dscrpt.Fields().ByNumber(protowire.Number(i))
+		field := dscrpt.Fields().ByNumber(protowire.Number(i + 1))
 		switch fieldDesc.Kind() {
 		case protoreflect.Int32Kind:
 			typeValue, err := strconv.ParseInt(row[i], 10, 32)
@@ -750,7 +750,7 @@ func (p *PbMysqlDB) LoadBykv(message proto.Message, whereType string, whereValue
 			result[i] = string(v)
 			i++
 		}
-		FillFieldMessage(message, columns)
+		FillFieldMessage(message, result)
 	}
 }
 
