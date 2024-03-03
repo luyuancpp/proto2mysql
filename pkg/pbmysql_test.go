@@ -93,8 +93,44 @@ func TestLoadSave(t *testing.T) {
 	pbMySqlDB.Save(pbsave)
 
 	pbload := &dbproto.GolangTest{}
-	pbMySqlDB.LoadBykv(pbload, "id", "1")
+	pbMySqlDB.LoadOneByKV(pbload, "id", "1")
 	if !proto.Equal(pbsave, pbload) {
+		log.Fatal("pb not equal")
+	}
+}
+
+func TestLoadSaveList(t *testing.T) {
+	pbMySqlDB := NewPb2DbTables()
+	pbsavelist := &dbproto.GolangTestList{}
+	pbsave := &dbproto.GolangTest{
+		Id:      1,
+		GroupId: 1,
+		Ip:      "127.0.0.1",
+		Port:    3306,
+		Player: &dbproto.Player{
+			PlayerId: 111,
+			Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
+		},
+	}
+	pbsavelist.TestList = append(pbsavelist.TestList, pbsave)
+	pbsavelist.TestList = append(pbsavelist.TestList, pbsave)
+
+	pbMySqlDB.CreateMysqlTable(pbsave)
+	mysqlConfig := GetMysqlConfig()
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	db := sql.OpenDB(conn)
+	defer db.Close()
+	pbMySqlDB.SetDB(db, mysqlConfig.DBName)
+	pbMySqlDB.UseDB()
+
+	pbMySqlDB.Save(pbsave)
+
+	pbloadlist := &dbproto.GolangTestList{}
+	pbMySqlDB.LoadList(pbloadlist)
+	if !proto.Equal(pbsavelist, pbloadlist) {
 		log.Fatal("pb not equal")
 	}
 }

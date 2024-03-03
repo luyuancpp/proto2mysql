@@ -20,3 +20,8 @@ message golang_test
   uint32 group_id = 4;
   player player = 5;
 }
+
+message golang_test_list
+{
+  repeated golang_test test_list = 1;
+}
