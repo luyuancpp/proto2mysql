@@ -43,17 +43,17 @@ func (m *MessageTableInfo) DefaultInstance() proto.Message {
 
 type PbMysqlDB struct {
 	Tables map[string]*MessageTableInfo
-	Db     *sql.DB
+	DB     *sql.DB
 	DBName string
 }
 
 func (p *PbMysqlDB) SetDB(db *sql.DB, dbname string) {
-	p.Db = db
+	p.DB = db
 	p.DBName = dbname
 }
 
 func (p *PbMysqlDB) UseDB() {
-	_, err := p.Db.Query("USE " + p.DBName)
+	_, err := p.DB.Query("USE " + p.DBName)
 	if err != nil {
 		fmt.Println(err)
 
@@ -703,7 +703,7 @@ func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
 		p.DBName,
 		table.tableName)
 
-	rows, err := p.Db.Query(sqlStmt)
+	rows, err := p.DB.Query(sqlStmt)
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -721,7 +721,7 @@ func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
 		}
 		table.fields[fieldIndex-1] = fieldName
 	}
-	p.Db.Exec(table.GetAlterTableAddFieldSqlStmt())
+	p.DB.Exec(table.GetAlterTableAddFieldSqlStmt())
 }
 
 func (p *PbMysqlDB) Save(message proto.Message) {
@@ -730,7 +730,7 @@ func (p *PbMysqlDB) Save(message proto.Message) {
 		fmt.Println("table not found")
 		return
 	}
-	_, err := p.Db.Exec(table.GetInsertOnDupUpdateSqlStmt(message, p.Db))
+	_, err := p.DB.Exec(table.GetInsertOnDupUpdateSqlStmt(message, p.DB))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -743,7 +743,7 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 		fmt.Println("table not found")
 		return
 	}
-	rows, err := p.Db.Query(table.GetSelectSqlByKVWhereStmt(whereType, whereValue))
+	rows, err := p.DB.Query(table.GetSelectSqlByKVWhereStmt(whereType, whereValue))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -782,7 +782,7 @@ func (p *PbMysqlDB) LoadList(message proto.Message) {
 		fmt.Println("table not found")
 		return
 	}
-	rows, err := p.Db.Query(table.GetSelectSqlStmt())
+	rows, err := p.DB.Query(table.GetSelectSqlStmt())
 	if err != nil {
 		fmt.Println(err)
 		return
