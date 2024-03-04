@@ -490,7 +490,7 @@ func (m *MessageTableInfo) GetSelectSqlStmt() string {
 	}
 	sql += " FROM "
 	sql += m.tableName
-	sql += "';"
+	sql += ";"
 	return sql
 }
 
@@ -772,8 +772,10 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 }
 
 func (p *PbMysqlDB) LoadList(message proto.Message) {
-	reflection := proto.MessageReflect(message)
-	listField := reflection.Descriptor().Fields().Get(0)
+	reflectionParent := proto.MessageReflect(message)
+	md := reflectionParent.Descriptor()
+	fds := md.Fields()
+	listField := fds.Get(0)
 	name := string(listField.Message().Name())
 	table, ok := p.Tables[name]
 	if !ok {
@@ -795,9 +797,7 @@ func (p *PbMysqlDB) LoadList(message proto.Message) {
 	for k, _ := range values {
 		scans[k] = &values[k]
 	}
-
-	listMessage := reflection.Mutable(listField).Message()
-	listMessage.Interface()
+	lv := reflectionParent.Mutable(listField).List()
 	for rows.Next() {
 		rows.Scan(scans...)
 		i := 0
@@ -806,10 +806,13 @@ func (p *PbMysqlDB) LoadList(message proto.Message) {
 			result[i] = string(v)
 			i++
 		}
+		ve := lv.NewElement()
+		ParseFromString(proto.MessageV1(ve.Message()), result)
+		lv.Append(ve)
 	}
 }
 
-func (p *PbMysqlDB) CreateMysqlTable(m proto.Message) {
+func (p *PbMysqlDB) AddMysqlTable(m proto.Message) {
 	p.Tables[GetTableName(m)] = &MessageTableInfo{
 		tableName:       GetTableName(m),
 		defaultInstance: m,
