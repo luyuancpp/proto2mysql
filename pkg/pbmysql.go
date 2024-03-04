@@ -17,20 +17,18 @@ const (
 )
 
 type MessageTableInfo struct {
-	tableName         string
-	defaultInstance   proto.Message
-	options           protoreflect.Message
-	primaryKeyField   protoreflect.FieldDescriptor
-	autoIncrement     uint64
-	fields            map[int]string
-	primaryKey        []string
-	indexes           []string
-	uniqueKeys        string
-	foreignKeys       string
-	foreignReferences string
-	autoIncreaseKey   string
-	Descriptor        protoreflect.MessageDescriptor
-	Db                *sql.DB
+	tableName       string
+	defaultInstance proto.Message
+	options         protoreflect.Message
+	primaryKeyField protoreflect.FieldDescriptor
+	autoIncrement   uint64
+	fields          map[int]string
+	primaryKey      []string
+	indexes         []string
+	uniqueKeys      string
+	autoIncreaseKey string
+	Descriptor      protoreflect.MessageDescriptor
+	Db              *sql.DB
 }
 
 func (m *MessageTableInfo) SetAutoIncrement(autoIncrement uint64) {
@@ -339,8 +337,6 @@ func (m *MessageTableInfo) GetCreateTableSqlStmt() string {
 		m.uniqueKeys = m.options.Get(dbproto.E_OptionUniqueKey.TypeDescriptor()).String()
 	}
 	m.autoIncreaseKey = m.options.Get(dbproto.E_OptionAutoIncrementKey.TypeDescriptor()).String()
-	m.foreignKeys = m.options.Get(dbproto.E_OptionForeignKey.TypeDescriptor()).String()
-	m.foreignReferences = m.options.Get(dbproto.E_OptionForeignReferences.TypeDescriptor()).String()
 	sql += " ("
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
@@ -361,15 +357,9 @@ func (m *MessageTableInfo) GetCreateTableSqlStmt() string {
 		}
 	}
 	sql += ", PRIMARY KEY ("
-	sql += string(m.primaryKey[kPrimaryKeyIndex])
+	sql += m.primaryKey[kPrimaryKeyIndex]
 	sql += ")"
-	if m.foreignKeys != "" && m.foreignReferences != "" {
-		sql += ", FOREIGN KEY ("
-		sql += m.foreignKeys
-		sql += ")"
-		sql += " REFERENCES "
-		sql += m.foreignReferences
-	}
+
 	if len(m.uniqueKeys) > 0 {
 		sql += ", UNIQUE KEY ("
 		sql += m.uniqueKeys
