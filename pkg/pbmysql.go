@@ -17,20 +17,21 @@ const (
 )
 
 type MessageTableInfo struct {
-	tableName        string
-	defaultInstance  proto.Message
-	options          protoreflect.Message
-	primaryKeyField  protoreflect.FieldDescriptor
-	autoIncrement    uint64
-	fields           map[int]string
-	primaryKey       []string
-	indexes          []string
-	uniqueKeys       string
-	autoIncreaseKey  string
-	Descriptor       protoreflect.MessageDescriptor
-	DB               *sql.DB
-	selectAllSqlStmt string
-	selectFieldsStmt string
+	tableName                    string
+	defaultInstance              proto.Message
+	options                      protoreflect.Message
+	primaryKeyField              protoreflect.FieldDescriptor
+	autoIncrement                uint64
+	fields                       map[int]string
+	primaryKey                   []string
+	indexes                      []string
+	uniqueKeys                   string
+	autoIncreaseKey              string
+	Descriptor                   protoreflect.MessageDescriptor
+	DB                           *sql.DB
+	selectAllSqlStmt             string
+	selectFieldsFromTableSqlStmt string
+	fieldsSqlStmt                string
 }
 
 func (m *MessageTableInfo) SetAutoIncrement(autoIncrement uint64) {
@@ -462,23 +463,31 @@ func (m *MessageTableInfo) GetSelectSqlStmt() string {
 	return m.getSelectFieldsFromTableSqlStmt() + ";"
 }
 
-func (m *MessageTableInfo) getSelectFieldsFromTableSqlStmt() string {
-	if len(m.selectFieldsStmt) > 0 {
-		return m.selectFieldsStmt
+func (m *MessageTableInfo) getFieldsSqlStmt() string {
+	if len(m.fieldsSqlStmt) > 0 {
+		return m.fieldsSqlStmt
 	}
-	m.selectFieldsStmt = "SELECT "
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
-			m.selectFieldsStmt += ", "
+			m.fieldsSqlStmt += ", "
 		} else {
 			needComma = true
 		}
-		m.selectFieldsStmt += string(m.Descriptor.Fields().Get(i).Name())
+		m.fieldsSqlStmt += string(m.Descriptor.Fields().Get(i).Name())
 	}
-	m.selectFieldsStmt += " FROM "
-	m.selectFieldsStmt += m.tableName
-	return m.selectFieldsStmt
+	return m.fieldsSqlStmt
+}
+
+func (m *MessageTableInfo) getSelectFieldsFromTableSqlStmt() string {
+	if len(m.selectFieldsFromTableSqlStmt) > 0 {
+		return m.selectFieldsFromTableSqlStmt
+	}
+	m.selectFieldsFromTableSqlStmt = "SELECT "
+	m.selectFieldsFromTableSqlStmt += m.getFieldsSqlStmt()
+	m.selectFieldsFromTableSqlStmt += " FROM "
+	m.selectFieldsFromTableSqlStmt += m.tableName
+	return m.selectFieldsFromTableSqlStmt
 }
 
 func (m *MessageTableInfo) GetSelectSqlWithWhereClause(whereClause string) string {
