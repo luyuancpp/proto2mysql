@@ -449,9 +449,7 @@ func (m *MessageTableInfo) GetInsertOnDupKeyForPrimaryKeyStmt(message proto.Mess
 }
 
 func (m *MessageTableInfo) GetSelectSqlByKVWhereStmt(whereType, whereVal string) string {
-	sql := m.getSelectFieldsSqlStmt()
-	sql += " FROM "
-	sql += m.tableName
+	sql := m.getSelectFieldsFromTableSqlStmt()
 	sql += " WHERE "
 	sql += whereType
 	sql += " = '"
@@ -461,14 +459,10 @@ func (m *MessageTableInfo) GetSelectSqlByKVWhereStmt(whereType, whereVal string)
 }
 
 func (m *MessageTableInfo) GetSelectSqlStmt() string {
-	sql := m.getSelectFieldsSqlStmt()
-	sql += " FROM "
-	sql += m.tableName
-	sql += ";"
-	return sql
+	return m.getSelectFieldsFromTableSqlStmt() + ";"
 }
 
-func (m *MessageTableInfo) getSelectFieldsSqlStmt() string {
+func (m *MessageTableInfo) getSelectFieldsFromTableSqlStmt() string {
 	if len(m.selectFieldsStmt) > 0 {
 		return m.selectFieldsStmt
 	}
@@ -482,13 +476,13 @@ func (m *MessageTableInfo) getSelectFieldsSqlStmt() string {
 		}
 		m.selectFieldsStmt += string(m.Descriptor.Fields().Get(i).Name())
 	}
+	m.selectFieldsStmt += " FROM "
+	m.selectFieldsStmt += m.tableName
 	return m.selectFieldsStmt
 }
 
 func (m *MessageTableInfo) GetSelectSqlWithWhereClause(whereClause string) string {
-	sql := m.getSelectFieldsSqlStmt()
-	sql += " FROM "
-	sql += m.tableName
+	sql := m.getSelectFieldsFromTableSqlStmt()
 	sql += " WHERE "
 	sql += whereClause
 	sql += ";"
@@ -515,9 +509,7 @@ func (m *MessageTableInfo) GetSelectAllSql() string {
 }
 
 func (m *MessageTableInfo) GetSelectAllSqlWithWhereClause(whereClause string) string {
-	sql := m.getSelectFieldsSqlStmt()
-	sql += " FROM "
-	sql += m.tableName
+	sql := m.getSelectFieldsFromTableSqlStmt()
 	sql += " WHERE "
 	sql += whereClause
 	sql += ";"
