@@ -460,7 +460,11 @@ func (m *MessageTableInfo) GetSelectSqlByKVWhereStmt(whereType, whereVal string)
 }
 
 func (m *MessageTableInfo) GetSelectSqlStmt() string {
-	return m.getSelectFieldsFromTableSqlStmt() + ";"
+	if len(m.selectAllSqlStmt) > 0 {
+		return m.selectAllSqlStmt
+	}
+	m.selectAllSqlStmt += m.getSelectFieldsFromTableSqlStmt() + ";"
+	return m.selectAllSqlStmt
 }
 
 func (m *MessageTableInfo) getFieldsSqlStmt() string {
@@ -491,33 +495,6 @@ func (m *MessageTableInfo) getSelectFieldsFromTableSqlStmt() string {
 }
 
 func (m *MessageTableInfo) GetSelectSqlWithWhereClause(whereClause string) string {
-	sql := m.getSelectFieldsFromTableSqlStmt()
-	sql += " WHERE "
-	sql += whereClause
-	sql += ";"
-	return sql
-}
-
-func (m *MessageTableInfo) GetSelectAllSql() string {
-	if len(m.selectAllSqlStmt) > 0 {
-		return m.selectAllSqlStmt
-	}
-	m.selectAllSqlStmt = "SELECT "
-	needComma := false
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		if needComma {
-			m.selectAllSqlStmt += ", "
-		} else {
-			needComma = true
-		}
-		m.selectAllSqlStmt += string(m.Descriptor.Fields().Get(i).Name())
-	}
-	m.selectAllSqlStmt += " FROM "
-	m.selectAllSqlStmt += m.tableName
-	return m.selectAllSqlStmt
-}
-
-func (m *MessageTableInfo) GetSelectAllSqlWithWhereClause(whereClause string) string {
 	sql := m.getSelectFieldsFromTableSqlStmt()
 	sql += " WHERE "
 	sql += whereClause
