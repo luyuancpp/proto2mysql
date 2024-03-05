@@ -17,18 +17,20 @@ const (
 )
 
 type MessageTableInfo struct {
-	tableName       string
-	defaultInstance proto.Message
-	options         protoreflect.Message
-	primaryKeyField protoreflect.FieldDescriptor
-	autoIncrement   uint64
-	fields          map[int]string
-	primaryKey      []string
-	indexes         []string
-	uniqueKeys      string
-	autoIncreaseKey string
-	Descriptor      protoreflect.MessageDescriptor
-	Db              *sql.DB
+	tableName        string
+	defaultInstance  proto.Message
+	options          protoreflect.Message
+	primaryKeyField  protoreflect.FieldDescriptor
+	autoIncrement    uint64
+	fields           map[int]string
+	primaryKey       []string
+	indexes          []string
+	uniqueKeys       string
+	autoIncreaseKey  string
+	Descriptor       protoreflect.MessageDescriptor
+	DB               *sql.DB
+	selectAllSqlStmt string
+	selectFieldsStmt string
 }
 
 func (m *MessageTableInfo) SetAutoIncrement(autoIncrement uint64) {
@@ -447,16 +449,7 @@ func (m *MessageTableInfo) GetInsertOnDupKeyForPrimaryKeyStmt(message proto.Mess
 }
 
 func (m *MessageTableInfo) GetSelectSqlByKVWhereStmt(whereType, whereVal string) string {
-	sql := "SELECT "
-	needComma := false
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		if needComma {
-			sql += ", "
-		} else {
-			needComma = true
-		}
-		sql += string(m.Descriptor.Fields().Get(i).Name())
-	}
+	sql := m.getSelectFieldsSqlStmt()
 	sql += " FROM "
 	sql += m.tableName
 	sql += " WHERE "
@@ -468,33 +461,32 @@ func (m *MessageTableInfo) GetSelectSqlByKVWhereStmt(whereType, whereVal string)
 }
 
 func (m *MessageTableInfo) GetSelectSqlStmt() string {
-	sql := "SELECT "
-	needComma := false
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		if needComma {
-			sql += ", "
-		} else {
-			needComma = true
-		}
-		sql += string(m.Descriptor.Fields().Get(i).Name())
-	}
+	sql := m.getSelectFieldsSqlStmt()
 	sql += " FROM "
 	sql += m.tableName
 	sql += ";"
 	return sql
 }
 
-func (m *MessageTableInfo) GetSelectSqlWithWhereClause(whereClause string) string {
-	sql := "SELECT "
+func (m *MessageTableInfo) getSelectFieldsSqlStmt() string {
+	if len(m.selectFieldsStmt) > 0 {
+		return m.selectFieldsStmt
+	}
+	m.selectFieldsStmt = "SELECT "
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
-			sql += ", "
+			m.selectFieldsStmt += ", "
 		} else {
 			needComma = true
 		}
-		sql += string(m.Descriptor.Fields().Get(i).Name())
+		m.selectFieldsStmt += string(m.Descriptor.Fields().Get(i).Name())
 	}
+	return m.selectFieldsStmt
+}
+
+func (m *MessageTableInfo) GetSelectSqlWithWhereClause(whereClause string) string {
+	sql := m.getSelectFieldsSqlStmt()
 	sql += " FROM "
 	sql += m.tableName
 	sql += " WHERE "
@@ -504,32 +496,26 @@ func (m *MessageTableInfo) GetSelectSqlWithWhereClause(whereClause string) strin
 }
 
 func (m *MessageTableInfo) GetSelectAllSql() string {
-	sql := "SELECT "
+	if len(m.selectAllSqlStmt) > 0 {
+		return m.selectAllSqlStmt
+	}
+	m.selectAllSqlStmt = "SELECT "
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
-			sql += ", "
+			m.selectAllSqlStmt += ", "
 		} else {
 			needComma = true
 		}
-		sql += string(m.Descriptor.Fields().Get(i).Name())
+		m.selectAllSqlStmt += string(m.Descriptor.Fields().Get(i).Name())
 	}
-	sql += " FROM "
-	sql += m.tableName
-	return sql
+	m.selectAllSqlStmt += " FROM "
+	m.selectAllSqlStmt += m.tableName
+	return m.selectAllSqlStmt
 }
 
 func (m *MessageTableInfo) GetSelectAllSqlWithWhereClause(whereClause string) string {
-	sql := "SELECT "
-	needComma := false
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		if needComma {
-			sql += ", "
-		} else {
-			needComma = true
-		}
-		sql += string(m.Descriptor.Fields().Get(i).Name())
-	}
+	sql := m.getSelectFieldsSqlStmt()
 	sql += " FROM "
 	sql += m.tableName
 	sql += " WHERE "
