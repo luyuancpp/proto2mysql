@@ -57,7 +57,6 @@ func (p *PbMysqlDB) UseDB() {
 	_, err := p.DB.Query("USE " + p.DBName)
 	if err != nil {
 		fmt.Println(err)
-
 	}
 }
 
@@ -407,17 +406,9 @@ func (m *MessageTableInfo) GetAlterTableAddFieldSqlStmt() string {
 func (m *MessageTableInfo) GetInsertSqlStmt(message proto.Message, db *sql.DB) string {
 	sql := "INSERT INTO " + m.tableName
 	sql += " ("
-	needComma := false
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		if needComma {
-			sql += ", "
-		} else {
-			needComma = true
-		}
-		sql += string(m.Descriptor.Fields().Get(i).Name())
-	}
+	sql += m.getFieldsSqlStmt()
 	sql += ") VALUES ("
-	needComma = false
+	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
 			sql += ", "
@@ -527,17 +518,9 @@ func (m *MessageTableInfo) GetDeleteSqlWithWhereClause(whereClause string, db *s
 func (m *MessageTableInfo) GetReplaceSql(message proto.Message, db *sql.DB) string {
 	sql := "REPLACE INTO " + m.tableName
 	sql += " ("
-	needComma := false
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		if needComma {
-			sql += ", "
-		} else {
-			needComma = true
-		}
-		sql += string(m.Descriptor.Fields().Get(i).Name())
-	}
+	sql += m.getFieldsSqlStmt()
 	sql += ") VALUES ("
-	needComma = false
+	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
 			sql += ", "
@@ -575,11 +558,10 @@ func (m *MessageTableInfo) GetUpdateSetStmt(message proto.Message, db *sql.DB) s
 
 func (m *MessageTableInfo) GetUpdateSql(message proto.Message, db *sql.DB) string {
 	sql := "UPDATE " + m.tableName
-	needComma := false
 	sql += " SET "
 	sql += m.GetUpdateSetStmt(message, db)
 	sql += " WHERE "
-	needComma = false
+	needComma := false
 	for _, primaryKey := range m.primaryKey {
 		field := m.Descriptor.Fields().ByName(protoreflect.Name(primaryKey))
 		if nil != field {
@@ -753,7 +735,10 @@ func (p *PbMysqlDB) LoadList(message proto.Message) {
 	}
 	lv := reflectionParent.Mutable(listField).List()
 	for rows.Next() {
-		rows.Scan(scans...)
+		err := rows.Scan(scans...)
+		if err != nil {
+			continue
+		}
 		i := 0
 		result := make([]string, len(columns))
 		for _, v := range values {
