@@ -451,37 +451,14 @@ func (m *MessageTableInfo) GetSelectSqlByKVWhereStmt(whereType, whereVal string)
 }
 
 func (m *MessageTableInfo) GetSelectSqlStmt() string {
-	if len(m.selectAllSqlStmt) > 0 {
-		return m.selectAllSqlStmt
-	}
-	m.selectAllSqlStmt += m.getSelectFieldsFromTableSqlStmt() + ";"
 	return m.selectAllSqlStmt
 }
 
 func (m *MessageTableInfo) getFieldsSqlStmt() string {
-	if len(m.fieldsSqlStmt) > 0 {
-		return m.fieldsSqlStmt
-	}
-	needComma := false
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		if needComma {
-			m.fieldsSqlStmt += ", "
-		} else {
-			needComma = true
-		}
-		m.fieldsSqlStmt += string(m.Descriptor.Fields().Get(i).Name())
-	}
 	return m.fieldsSqlStmt
 }
 
 func (m *MessageTableInfo) getSelectFieldsFromTableSqlStmt() string {
-	if len(m.selectFieldsFromTableSqlStmt) > 0 {
-		return m.selectFieldsFromTableSqlStmt
-	}
-	m.selectFieldsFromTableSqlStmt = "SELECT "
-	m.selectFieldsFromTableSqlStmt += m.getFieldsSqlStmt()
-	m.selectFieldsFromTableSqlStmt += " FROM "
-	m.selectFieldsFromTableSqlStmt += m.tableName
 	return m.selectFieldsFromTableSqlStmt
 }
 
@@ -577,6 +554,26 @@ func (m *MessageTableInfo) GetUpdateSql(message proto.Message, db *sql.DB) strin
 		}
 	}
 	return sql
+}
+
+func (m *MessageTableInfo) Init() {
+
+	needComma := false
+	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
+		if needComma {
+			m.fieldsSqlStmt += ", "
+		} else {
+			needComma = true
+		}
+		m.fieldsSqlStmt += string(m.Descriptor.Fields().Get(i).Name())
+	}
+
+	m.selectFieldsFromTableSqlStmt = "SELECT "
+	m.selectFieldsFromTableSqlStmt += m.fieldsSqlStmt
+	m.selectFieldsFromTableSqlStmt += " FROM "
+	m.selectFieldsFromTableSqlStmt += m.tableName
+
+	m.selectAllSqlStmt = m.getSelectFieldsFromTableSqlStmt() + ";"
 }
 
 func (m *MessageTableInfo) GetUpdateSqlWithWhereClause(message proto.Message, db *sql.DB, whereClause string) string {
@@ -757,4 +754,10 @@ func (p *PbMysqlDB) AddMysqlTable(m proto.Message) {
 		Descriptor:      GetDescriptor(m),
 		options:         GetDescriptor(m).Options().ProtoReflect(),
 		fields:          make(map[int]string)}
+
+	table, ok := p.Tables[GetTableName(m)]
+	if !ok {
+		return
+	}
+	table.Init()
 }
