@@ -507,8 +507,7 @@ func (m *MessageTableInfo) GetDeleteSql(message proto.Message, db *sql.DB) strin
 }
 
 func (m *MessageTableInfo) GetDeleteSqlWithWhereClause(whereClause string, db *sql.DB) string {
-	sql := "DELETE "
-	sql += " FROM "
+	sql := "DELETE FROM "
 	sql += m.tableName
 	sql += " WHERE "
 	sql += whereClause
