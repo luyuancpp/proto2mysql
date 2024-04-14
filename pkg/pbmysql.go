@@ -32,6 +32,8 @@ type MessageTableInfo struct {
 	selectAllSqlStmt             string
 	selectFieldsFromTableSqlStmt string
 	fieldsSqlStmt                string
+	replaceSqlIntoStmt           string
+	insertInfoStmt               string
 }
 
 func (m *MessageTableInfo) SetAutoIncrement(autoIncrement uint64) {
@@ -60,7 +62,7 @@ func (p *PbMysqlDB) UseDB() {
 	}
 }
 
-func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor, db *sql.DB) string {
+func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor) string {
 	reflection := proto.MessageReflect(message)
 	fieldValue := ""
 	switch fieldDesc.Kind() {
@@ -380,9 +382,6 @@ func (m *MessageTableInfo) GetCreateTableSqlStmt() string {
 }
 
 func (m *MessageTableInfo) GetAlterTableAddFieldSqlStmt() string {
-	if m.Descriptor.Fields().Len() == len(m.primaryKey) {
-		return ""
-	}
 	sql := "ALTER TABLE " + m.tableName
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		field := m.Descriptor.Fields().Get(i)
@@ -404,10 +403,7 @@ func (m *MessageTableInfo) GetAlterTableAddFieldSqlStmt() string {
 }
 
 func (m *MessageTableInfo) GetInsertSqlStmt(message proto.Message, db *sql.DB) string {
-	sql := "INSERT INTO " + m.tableName
-	sql += " ("
-	sql += m.getFieldsSqlStmt()
-	sql += ") VALUES ("
+	sql := m.insertInfoStmt + "("
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
@@ -416,7 +412,7 @@ func (m *MessageTableInfo) GetInsertSqlStmt(message proto.Message, db *sql.DB) s
 			needComma = true
 		}
 		fieldDesc := m.Descriptor.Fields().Get(i)
-		value := SerializeFieldAsString(message, fieldDesc, db)
+		value := SerializeFieldAsString(message, fieldDesc)
 		sql += "'" + value + "'"
 	}
 	sql += ")"
@@ -434,7 +430,7 @@ func (m *MessageTableInfo) GetInsertOnDupKeyForPrimaryKeyStmt(message proto.Mess
 	sql := m.GetInsertSqlStmt(message, db)
 	sql += " ON DUPLICATE KEY UPDATE "
 	sql += " " + string(m.primaryKeyField.Name())
-	value := SerializeFieldAsString(message, m.primaryKeyField, db)
+	value := SerializeFieldAsString(message, m.primaryKeyField)
 	sql += "="
 	sql += "'" + value + "';"
 	return sql
@@ -471,12 +467,11 @@ func (m *MessageTableInfo) GetSelectSqlWithWhereClause(whereClause string) strin
 }
 
 func (m *MessageTableInfo) GetDeleteSql(message proto.Message, db *sql.DB) string {
-	sql := "DELETE "
-	sql += " FROM "
+	sql := "DELETE  FROM "
 	sql += m.tableName
 	sql += " WHERE "
 	sql += string(m.Descriptor.Fields().Get(kPrimaryKeyIndex).Name())
-	value := SerializeFieldAsString(message, m.primaryKeyField, db)
+	value := SerializeFieldAsString(message, m.primaryKeyField)
 	sql += " = '"
 	sql += value
 	sql += "'"
@@ -491,11 +486,8 @@ func (m *MessageTableInfo) GetDeleteSqlWithWhereClause(whereClause string, db *s
 	return sql
 }
 
-func (m *MessageTableInfo) GetReplaceSql(message proto.Message, db *sql.DB) string {
-	sql := "REPLACE INTO " + m.tableName
-	sql += " ("
-	sql += m.getFieldsSqlStmt()
-	sql += ") VALUES ("
+func (m *MessageTableInfo) GetReplaceIntoSql(message proto.Message, db *sql.DB) string {
+	sql := m.replaceSqlIntoStmt
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
@@ -504,7 +496,7 @@ func (m *MessageTableInfo) GetReplaceSql(message proto.Message, db *sql.DB) stri
 			needComma = true
 		}
 		fieldDesc := m.Descriptor.Fields().Get(i)
-		value := SerializeFieldAsString(message, fieldDesc, db)
+		value := SerializeFieldAsString(message, fieldDesc)
 		sql += "'" + value + "'"
 	}
 	sql += ")"
@@ -524,7 +516,7 @@ func (m *MessageTableInfo) GetUpdateSetStmt(message proto.Message, db *sql.DB) s
 				needComma = true
 			}
 			sql += " " + string(field.Name())
-			value := SerializeFieldAsString(message, field, db)
+			value := SerializeFieldAsString(message, field)
 			sql += "="
 			sql += "'" + value + "'"
 		}
@@ -547,7 +539,7 @@ func (m *MessageTableInfo) GetUpdateSql(message proto.Message, db *sql.DB) strin
 				needComma = true
 			}
 			sql += primaryKey
-			value := SerializeFieldAsString(message, field, db)
+			value := SerializeFieldAsString(message, field)
 			sql += "='"
 			sql += value
 			sql += "'"
@@ -574,6 +566,10 @@ func (m *MessageTableInfo) Init() {
 	m.selectFieldsFromTableSqlStmt += m.tableName
 
 	m.selectAllSqlStmt = m.getSelectFieldsFromTableSqlStmt() + ";"
+
+	m.replaceSqlIntoStmt = "REPLACE INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES ("
+
+	m.insertInfoStmt = "INSERT INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES "
 }
 
 func (m *MessageTableInfo) GetUpdateSqlWithWhereClause(message proto.Message, db *sql.DB, whereClause string) string {
@@ -588,7 +584,7 @@ func (m *MessageTableInfo) GetUpdateSqlWithWhereClause(message proto.Message, db
 		}
 		sql += " " + string(m.Descriptor.Fields().Get(i).Name())
 		fieldDesc := m.Descriptor.Fields().Get(i)
-		value := SerializeFieldAsString(message, fieldDesc, db)
+		value := SerializeFieldAsString(message, fieldDesc)
 		sql += "="
 		sql += "'" + value + "'"
 	}
@@ -662,7 +658,7 @@ func (p *PbMysqlDB) Save(message proto.Message) {
 		fmt.Println("table not found")
 		return
 	}
-	_, err := p.DB.Exec(table.GetInsertOnDupUpdateSqlStmt(message, p.DB))
+	_, err := p.DB.Exec(table.GetReplaceIntoSql(message, p.DB))
 	if err != nil {
 		fmt.Println(err)
 		return
