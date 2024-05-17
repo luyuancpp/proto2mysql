@@ -8,6 +8,7 @@ import (
 	"github.com/luyuancpp/pbmysql-go/dbproto"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"log"
 	"strconv"
 	"strings"
 )
@@ -751,4 +752,12 @@ func (p *PbMysqlDB) AddMysqlTable(m proto.Message) {
 		return
 	}
 	table.Init()
+}
+
+func (p *PbMysqlDB) Close() {
+	err := p.DB.Close()
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
 }
