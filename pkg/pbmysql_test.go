@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"github.com/go-sql-driver/mysql"
 	"github.com/golang/protobuf/proto"
+	"github.com/luyuancpp/pbmysql-go/dbproto"
 	"log"
 	"os"
-	"pbmysql-go/dbproto"
 	"testing"
 )
 

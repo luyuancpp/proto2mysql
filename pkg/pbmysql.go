@@ -5,9 +5,9 @@ import (
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang/protobuf/proto"
+	"github.com/luyuancpp/pbmysql-go/dbproto"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"pbmysql-go/dbproto"
 	"strconv"
 	"strings"
 )

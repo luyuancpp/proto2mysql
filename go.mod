@@ -1,4 +1,4 @@
-module pbmysql-go
+module github.com/luyuancpp/pbmysql-go
 
 go 1.21.5
 
