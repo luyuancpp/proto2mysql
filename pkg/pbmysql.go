@@ -50,16 +50,11 @@ type PbMysqlDB struct {
 	DBName string
 }
 
-func (p *PbMysqlDB) SetDB(db *sql.DB, dbname string) {
+func (p *PbMysqlDB) OpenDB(db *sql.DB, dbname string) error {
 	p.DB = db
 	p.DBName = dbname
-}
-
-func (p *PbMysqlDB) UseDB() {
 	_, err := p.DB.Query("USE " + p.DBName)
-	if err != nil {
-		fmt.Println(err)
-	}
+	return err
 }
 
 func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor) string {

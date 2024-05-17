@@ -43,9 +43,18 @@ func TestCreateTable(t *testing.T) {
 		log.Fatal(err)
 	}
 	db := sql.OpenDB(conn)
-	defer db.Close()
-	pbMySqlDB.SetDB(db, mysqlConfig.DBName)
-	pbMySqlDB.UseDB()
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
+
+	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	if err != nil {
+		log.Fatal(err)
+	}
+	
 	result, err := db.Exec(pbMySqlDB.GetCreateTableSql(&dbproto.GolangTest{}))
 	if err != nil {
 		fmt.Println(err)
@@ -66,7 +75,7 @@ func TestAlterTable(t *testing.T) {
 	db := sql.OpenDB(conn)
 	defer db.Close()
 
-	pbMySqlDB.SetDB(db, mysqlConfig.DBName)
+	pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
 	pbMySqlDB.UseDB()
 
 	pbMySqlDB.AlterTableAddField(&dbproto.GolangTest{})
@@ -92,7 +101,7 @@ func TestLoadSave(t *testing.T) {
 	}
 	db := sql.OpenDB(conn)
 	defer db.Close()
-	pbMySqlDB.SetDB(db, mysqlConfig.DBName)
+	pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
 	pbMySqlDB.UseDB()
 
 	pbMySqlDB.Save(pbSave)
@@ -138,7 +147,7 @@ func TestLoadSaveList(t *testing.T) {
 	}
 	db := sql.OpenDB(conn)
 	defer db.Close()
-	pbMySqlDB.SetDB(db, mysqlConfig.DBName)
+	pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
 	pbMySqlDB.UseDB()
 
 	pbLoadList := &dbproto.GolangTestList{}
