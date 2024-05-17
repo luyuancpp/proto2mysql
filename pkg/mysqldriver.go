@@ -13,11 +13,11 @@ type JsonConfig struct {
 }
 
 func NewMysqlConfig(jsonConfig JsonConfig) *mysql.Config {
-	mycnf := mysql.NewConfig()
-	mycnf.User = jsonConfig.User
-	mycnf.Passwd = jsonConfig.Passwd
-	mycnf.Addr = jsonConfig.Addr
-	mycnf.Net = jsonConfig.Net
-	mycnf.DBName = jsonConfig.DBName
-	return mycnf
+	myCnf := mysql.NewConfig()
+	myCnf.User = jsonConfig.User
+	myCnf.Passwd = jsonConfig.Passwd
+	myCnf.Addr = jsonConfig.Addr
+	myCnf.Net = jsonConfig.Net
+	myCnf.DBName = jsonConfig.DBName
+	return myCnf
 }

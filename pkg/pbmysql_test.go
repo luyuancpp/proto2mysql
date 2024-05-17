@@ -14,7 +14,12 @@ import (
 
 func GetMysqlConfig() *mysql.Config {
 	file, err := os.Open("db.json")
-	defer file.Close()
+	defer func(file *os.File) {
+		err := file.Close()
+		if err != nil {
+			fmt.Println(err)
+		}
+	}(file)
 	if err != nil {
 		fmt.Println(err)
 		return nil
