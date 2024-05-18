@@ -1,4 +1,4 @@
-package pkg
+package pbmysql_go
 
 import (
 	"database/sql"
@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"github.com/go-sql-driver/mysql"
 	"github.com/golang/protobuf/proto"
-	"github.com/luyuancpp/pbmysql-go/dbproto"
+	"github.com/luyuancpp/dbprotooption"
 	"log"
 	"os"
 	"testing"
@@ -35,7 +35,7 @@ func GetMysqlConfig() *mysql.Config {
 
 func TestCreateTable(t *testing.T) {
 	pbMySqlDB := NewPb2DbTables()
-	pbMySqlDB.AddMysqlTable(&dbproto.GolangTest{})
+	pbMySqlDB.AddMysqlTable(&dbprotooption.GolangTest{})
 
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
@@ -55,7 +55,7 @@ func TestCreateTable(t *testing.T) {
 		log.Fatal(err)
 	}
 
-	result, err := db.Exec(pbMySqlDB.GetCreateTableSql(&dbproto.GolangTest{}))
+	result, err := db.Exec(pbMySqlDB.GetCreateTableSql(&dbprotooption.GolangTest{}))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -65,7 +65,7 @@ func TestCreateTable(t *testing.T) {
 
 func TestAlterTable(t *testing.T) {
 	pbMySqlDB := NewPb2DbTables()
-	pbMySqlDB.AddMysqlTable(&dbproto.GolangTest{})
+	pbMySqlDB.AddMysqlTable(&dbprotooption.GolangTest{})
 
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
@@ -77,17 +77,17 @@ func TestAlterTable(t *testing.T) {
 
 	pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
 
-	pbMySqlDB.AlterTableAddField(&dbproto.GolangTest{})
+	pbMySqlDB.AlterTableAddField(&dbprotooption.GolangTest{})
 }
 
 func TestLoadSave(t *testing.T) {
 	pbMySqlDB := NewPb2DbTables()
-	pbSave := &dbproto.GolangTest{
+	pbSave := &dbprotooption.GolangTest{
 		Id:      1,
 		GroupId: 1,
 		Ip:      "127.0.0.1",
 		Port:    3306,
-		Player: &dbproto.Player{
+		Player: &dbprotooption.Player{
 			PlayerId: 111,
 			Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
 		},
@@ -104,7 +104,7 @@ func TestLoadSave(t *testing.T) {
 
 	pbMySqlDB.Save(pbSave)
 
-	pbload := &dbproto.GolangTest{}
+	pbload := &dbprotooption.GolangTest{}
 	pbMySqlDB.LoadOneByKV(pbload, "id", "1")
 	if !proto.Equal(pbSave, pbload) {
 		log.Fatal("pb not equal")
@@ -113,14 +113,14 @@ func TestLoadSave(t *testing.T) {
 
 func TestLoadSaveList(t *testing.T) {
 	pbMySqlDB := NewPb2DbTables()
-	pbSaveList := &dbproto.GolangTestList{
-		TestList: []*dbproto.GolangTest{
+	pbSaveList := &dbprotooption.GolangTestList{
+		TestList: []*dbprotooption.GolangTest{
 			{
 				Id:      1,
 				GroupId: 1,
 				Ip:      "127.0.0.1",
 				Port:    3306,
-				Player: &dbproto.Player{
+				Player: &dbprotooption.Player{
 					PlayerId: 111,
 					Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
 				},
@@ -130,14 +130,14 @@ func TestLoadSaveList(t *testing.T) {
 				GroupId: 1,
 				Ip:      "127.0.0.1",
 				Port:    3306,
-				Player: &dbproto.Player{
+				Player: &dbprotooption.Player{
 					PlayerId: 111,
 					Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
 				},
 			},
 		},
 	}
-	pbMySqlDB.AddMysqlTable(&dbproto.GolangTest{})
+	pbMySqlDB.AddMysqlTable(&dbprotooption.GolangTest{})
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
 	if err != nil {
@@ -147,7 +147,7 @@ func TestLoadSaveList(t *testing.T) {
 	defer db.Close()
 	pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
 
-	pbLoadList := &dbproto.GolangTestList{}
+	pbLoadList := &dbprotooption.GolangTestList{}
 	pbMySqlDB.LoadList(pbLoadList)
 	if !proto.Equal(pbSaveList, pbLoadList) {
 		fmt.Println(pbSaveList.String())

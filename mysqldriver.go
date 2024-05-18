@@ -1,4 +1,4 @@
-package pkg
+package pbmysql_go
 
 import (
 	"github.com/go-sql-driver/mysql"

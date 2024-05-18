@@ -1,11 +1,11 @@
-package pkg
+package pbmysql_go
 
 import (
 	"database/sql"
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/golang/protobuf/proto"
-	"github.com/luyuancpp/pbmysql-go/dbproto"
+	"github.com/luyuancpp/dbprotooption"
 	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"log"
@@ -325,18 +325,18 @@ func EscapeStringQuotes(buf []byte, v string) []byte {
 func (m *MessageTableInfo) GetCreateTableSqlStmt() string {
 	sql := "CREATE TABLE IF NOT EXISTS " + m.tableName
 
-	if m.options.Has(dbproto.E_OptionPrimaryKey.TypeDescriptor()) {
-		v := m.options.Get(dbproto.E_OptionPrimaryKey.TypeDescriptor())
+	if m.options.Has(dbprotooption.E_OptionPrimaryKey.TypeDescriptor()) {
+		v := m.options.Get(dbprotooption.E_OptionPrimaryKey.TypeDescriptor())
 		m.primaryKey = strings.Split(v.String(), ",")
 	}
-	if m.options.Has(dbproto.E_OptionIndex.TypeDescriptor()) {
-		v := m.options.Get(dbproto.E_OptionPrimaryKey.TypeDescriptor())
+	if m.options.Has(dbprotooption.E_OptionIndex.TypeDescriptor()) {
+		v := m.options.Get(dbprotooption.E_OptionPrimaryKey.TypeDescriptor())
 		m.indexes = strings.Split(v.String(), ",")
 	}
-	if m.options.Has(dbproto.E_OptionUniqueKey.TypeDescriptor()) {
-		m.uniqueKeys = m.options.Get(dbproto.E_OptionUniqueKey.TypeDescriptor()).String()
+	if m.options.Has(dbprotooption.E_OptionUniqueKey.TypeDescriptor()) {
+		m.uniqueKeys = m.options.Get(dbprotooption.E_OptionUniqueKey.TypeDescriptor()).String()
 	}
-	m.autoIncreaseKey = m.options.Get(dbproto.E_OptionAutoIncrementKey.TypeDescriptor()).String()
+	m.autoIncreaseKey = m.options.Get(dbprotooption.E_OptionAutoIncrementKey.TypeDescriptor()).String()
 	sql += " ("
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
