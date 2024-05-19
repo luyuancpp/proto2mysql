@@ -374,6 +374,7 @@ func (m *MessageTableInfo) GetCreateTableSqlStmt() string {
 	if m.autoIncreaseKey != "" {
 		sql += " AUTO_INCREMENT=1"
 	}
+	sql += " default charset = utf8mb4 "
 	return sql
 }
 
