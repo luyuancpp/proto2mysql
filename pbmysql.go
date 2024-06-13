@@ -18,19 +18,21 @@ const (
 )
 
 type MessageTableInfo struct {
-	tableName                    string
-	defaultInstance              proto.Message
-	options                      protoreflect.Message
-	primaryKeyField              protoreflect.FieldDescriptor
-	autoIncrement                uint64
-	fields                       map[int]string
-	primaryKey                   []string
-	indexes                      []string
-	uniqueKeys                   string
-	autoIncreaseKey              string
-	Descriptor                   protoreflect.MessageDescriptor
-	DB                           *sql.DB
-	selectAllSqlStmt             string
+	tableName                      string
+	defaultInstance                proto.Message
+	options                        protoreflect.Message
+	primaryKeyField                protoreflect.FieldDescriptor
+	autoIncrement                  uint64
+	fields                         map[int]string
+	primaryKey                     []string
+	indexes                        []string
+	uniqueKeys                     string
+	autoIncreaseKey                string
+	Descriptor                     protoreflect.MessageDescriptor
+	DB                             *sql.DB
+	selectAllSqlStmt               string
+	selectAllSqlStmtNoEndSemicolon string
+
 	selectFieldsFromTableSqlStmt string
 	fieldsSqlStmt                string
 	replaceSqlIntoStmt           string
@@ -447,6 +449,10 @@ func (m *MessageTableInfo) GetSelectSqlStmt() string {
 	return m.selectAllSqlStmt
 }
 
+func (m *MessageTableInfo) GetSelectSqlStmtNoEndSemicolon() string {
+	return m.selectAllSqlStmtNoEndSemicolon
+}
+
 func (m *MessageTableInfo) getFieldsSqlStmt() string {
 	return m.fieldsSqlStmt
 }
@@ -563,6 +569,7 @@ func (m *MessageTableInfo) Init() {
 	m.selectFieldsFromTableSqlStmt += m.tableName
 
 	m.selectAllSqlStmt = m.getSelectFieldsFromTableSqlStmt() + ";"
+	m.selectAllSqlStmtNoEndSemicolon = m.getSelectFieldsFromTableSqlStmt()
 
 	m.replaceSqlIntoStmt = "REPLACE INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES ("
 
@@ -696,6 +703,41 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 	}
 }
 
+func (p *PbMysqlDB) LoadOneBywHERECase(message proto.Message, whereCase string) {
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		fmt.Println("table not found")
+		return
+	}
+	stm := table.GetSelectSqlStmtNoEndSemicolon() + whereCase + ";"
+	rows, err := p.DB.Query(stm)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	columns, err := rows.Columns()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	vals := make([][]byte, len(columns))
+	scans := make([]interface{}, len(columns))
+	for k, _ := range vals {
+		scans[k] = &vals[k]
+	}
+
+	for rows.Next() {
+		rows.Scan(scans...)
+		i := 0
+		result := make([]string, len(columns))
+		for _, v := range vals {
+			result[i] = string(v)
+			i++
+		}
+		ParseFromString(message, result)
+	}
+}
+
 func (p *PbMysqlDB) LoadList(message proto.Message) {
 	reflectionParent := proto.MessageReflect(message)
 	md := reflectionParent.Descriptor()
@@ -708,6 +750,51 @@ func (p *PbMysqlDB) LoadList(message proto.Message) {
 		return
 	}
 	rows, err := p.DB.Query(table.GetSelectSqlStmt())
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	columns, err := rows.Columns()
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	values := make([][]byte, len(columns))
+	scans := make([]interface{}, len(columns))
+	for k, _ := range values {
+		scans[k] = &values[k]
+	}
+	lv := reflectionParent.Mutable(listField).List()
+	for rows.Next() {
+		err := rows.Scan(scans...)
+		if err != nil {
+			continue
+		}
+		i := 0
+		result := make([]string, len(columns))
+		for _, v := range values {
+			result[i] = string(v)
+			i++
+		}
+		ve := lv.NewElement()
+		ParseFromString(proto.MessageV1(ve.Message()), result)
+		lv.Append(ve)
+	}
+}
+
+func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string) {
+	reflectionParent := proto.MessageReflect(message)
+	md := reflectionParent.Descriptor()
+	fds := md.Fields()
+	listField := fds.Get(0)
+	name := string(listField.Message().Name())
+	table, ok := p.Tables[name]
+	if !ok {
+		fmt.Println("table not found")
+		return
+	}
+	stm := table.GetSelectSqlStmtNoEndSemicolon() + whereCase + ";"
+	rows, err := p.DB.Query(stm)
 	if err != nil {
 		fmt.Println(err)
 		return

@@ -73,9 +73,18 @@ func TestAlterTable(t *testing.T) {
 		log.Fatal(err)
 	}
 	db := sql.OpenDB(conn)
-	defer db.Close()
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
 
-	pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
 
 	pbMySqlDB.AlterTableAddField(&dbprotooption.GolangTest{})
 }
@@ -99,14 +108,61 @@ func TestLoadSave(t *testing.T) {
 		log.Fatal(err)
 	}
 	db := sql.OpenDB(conn)
-	defer db.Close()
-	pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
+	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	if err != nil {
+		return
+	}
 
 	pbMySqlDB.Save(pbSave)
 
-	pbload := &dbprotooption.GolangTest{}
-	pbMySqlDB.LoadOneByKV(pbload, "id", "1")
-	if !proto.Equal(pbSave, pbload) {
+	pbLoad := &dbprotooption.GolangTest{}
+	pbMySqlDB.LoadOneByKV(pbLoad, "id", "1")
+	if !proto.Equal(pbSave, pbLoad) {
+		log.Fatal("pb not equal")
+	}
+}
+
+func TestLoadByWhereCase(t *testing.T) {
+	pbMySqlDB := NewPb2DbTables()
+	pbSave := &dbprotooption.GolangTest{
+		Id:      1,
+		GroupId: 1,
+		Ip:      "127.0.0.1",
+		Port:    3306,
+		Player: &dbprotooption.Player{
+			PlayerId: 111,
+			Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
+		},
+	}
+	pbMySqlDB.AddMysqlTable(pbSave)
+	mysqlConfig := GetMysqlConfig()
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	db := sql.OpenDB(conn)
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
+	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	if err != nil {
+		return
+	}
+
+	pbMySqlDB.Save(pbSave)
+
+	pbLoad := &dbprotooption.GolangTest{}
+	pbMySqlDB.LoadOneBywHERECase(pbLoad, "where id = 1")
+	if !proto.Equal(pbSave, pbLoad) {
 		log.Fatal("pb not equal")
 	}
 }
@@ -144,11 +200,72 @@ func TestLoadSaveList(t *testing.T) {
 		log.Fatal(err)
 	}
 	db := sql.OpenDB(conn)
-	defer db.Close()
-	pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
+	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	if err != nil {
+		return
+	}
 
 	pbLoadList := &dbprotooption.GolangTestList{}
 	pbMySqlDB.LoadList(pbLoadList)
+	if !proto.Equal(pbSaveList, pbLoadList) {
+		fmt.Println(pbSaveList.String())
+		fmt.Println(pbLoadList.String())
+		log.Fatal("pb not equal")
+	}
+}
+
+func TestLoadSaveListWhereCase(t *testing.T) {
+	pbMySqlDB := NewPb2DbTables()
+	pbSaveList := &dbprotooption.GolangTestList{
+		TestList: []*dbprotooption.GolangTest{
+			{
+				Id:      1,
+				GroupId: 1,
+				Ip:      "127.0.0.1",
+				Port:    3306,
+				Player: &dbprotooption.Player{
+					PlayerId: 111,
+					Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
+				},
+			},
+			{
+				Id:      2,
+				GroupId: 1,
+				Ip:      "127.0.0.1",
+				Port:    3306,
+				Player: &dbprotooption.Player{
+					PlayerId: 111,
+					Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
+				},
+			},
+		},
+	}
+	pbMySqlDB.AddMysqlTable(&dbprotooption.GolangTest{})
+	mysqlConfig := GetMysqlConfig()
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	db := sql.OpenDB(conn)
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
+	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	if err != nil {
+		return
+	}
+
+	pbLoadList := &dbprotooption.GolangTestList{}
+	pbMySqlDB.LoadListByWhereCase(pbLoadList, "where groupid ==1")
 	if !proto.Equal(pbSaveList, pbLoadList) {
 		fmt.Println(pbSaveList.String())
 		fmt.Println(pbLoadList.String())
