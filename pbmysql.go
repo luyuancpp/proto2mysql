@@ -703,7 +703,7 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 	}
 }
 
-func (p *PbMysqlDB) LoadOneBywHERECase(message proto.Message, whereCase string) {
+func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
 		fmt.Println("table not found")

@@ -161,7 +161,7 @@ func TestLoadByWhereCase(t *testing.T) {
 	pbMySqlDB.Save(pbSave)
 
 	pbLoad := &dbprotooption.GolangTest{}
-	pbMySqlDB.LoadOneBywHERECase(pbLoad, "where id = 1")
+	pbMySqlDB.LoadOneByWhereCase(pbLoad, "where id = 1")
 	if !proto.Equal(pbSave, pbLoad) {
 		log.Fatal("pb not equal")
 	}
