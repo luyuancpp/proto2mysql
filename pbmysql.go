@@ -569,7 +569,7 @@ func (m *MessageTableInfo) Init() {
 	m.selectFieldsFromTableSqlStmt += m.tableName
 
 	m.selectAllSqlStmt = m.getSelectFieldsFromTableSqlStmt() + ";"
-	m.selectAllSqlStmtNoEndSemicolon = m.getSelectFieldsFromTableSqlStmt()
+	m.selectAllSqlStmtNoEndSemicolon = m.getSelectFieldsFromTableSqlStmt() + " "
 
 	m.replaceSqlIntoStmt = "REPLACE INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES ("
 

@@ -101,6 +101,16 @@ func TestLoadSave(t *testing.T) {
 			Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
 		},
 	}
+	pbSave1 := &dbprotooption.GolangTest{
+		Id:      2,
+		GroupId: 1,
+		Ip:      "127.0.0.1",
+		Port:    3306,
+		Player: &dbprotooption.Player{
+			PlayerId: 111,
+			Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
+		},
+	}
 	pbMySqlDB.AddMysqlTable(pbSave)
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
@@ -120,6 +130,7 @@ func TestLoadSave(t *testing.T) {
 	}
 
 	pbMySqlDB.Save(pbSave)
+	pbMySqlDB.Save(pbSave1)
 
 	pbLoad := &dbprotooption.GolangTest{}
 	pbMySqlDB.LoadOneByKV(pbLoad, "id", "1")
@@ -161,7 +172,7 @@ func TestLoadByWhereCase(t *testing.T) {
 	pbMySqlDB.Save(pbSave)
 
 	pbLoad := &dbprotooption.GolangTest{}
-	pbMySqlDB.LoadOneByWhereCase(pbLoad, "where id = 1")
+	pbMySqlDB.LoadOneByWhereCase(pbLoad, "where id=1")
 	if !proto.Equal(pbSave, pbLoad) {
 		log.Fatal("pb not equal")
 	}
@@ -265,7 +276,7 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 	}
 
 	pbLoadList := &dbprotooption.GolangTestList{}
-	pbMySqlDB.LoadListByWhereCase(pbLoadList, "where groupid ==1")
+	pbMySqlDB.LoadListByWhereCase(pbLoadList, "where group_id=1")
 	if !proto.Equal(pbSaveList, pbLoadList) {
 		fmt.Println(pbSaveList.String())
 		fmt.Println(pbLoadList.String())
