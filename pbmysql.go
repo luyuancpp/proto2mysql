@@ -17,7 +17,7 @@ const (
 	kPrimaryKeyIndex = 0
 )
 
-type MessageTableInfo struct {
+type MessageTable struct {
 	tableName                      string
 	defaultInstance                proto.Message
 	options                        protoreflect.Message
@@ -36,19 +36,19 @@ type MessageTableInfo struct {
 	selectFieldsFromTableSqlStmt string
 	fieldsSqlStmt                string
 	replaceSqlIntoStmt           string
-	insertInfoStmt               string
+	insertStmt                   string
 }
 
-func (m *MessageTableInfo) SetAutoIncrement(autoIncrement uint64) {
+func (m *MessageTable) SetAutoIncrement(autoIncrement uint64) {
 	m.autoIncrement = autoIncrement
 }
 
-func (m *MessageTableInfo) DefaultInstance() proto.Message {
+func (m *MessageTable) DefaultInstance() proto.Message {
 	return m.defaultInstance
 }
 
 type PbMysqlDB struct {
-	Tables map[string]*MessageTableInfo
+	Tables map[string]*MessageTable
 	DB     *sql.DB
 	DBName string
 }
@@ -93,10 +93,10 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 
 func ParseFromString(message proto.Message, row []string) {
 	reflection := proto.MessageReflect(message)
-	dscrpt := reflection.Descriptor()
-	for i := 0; i < dscrpt.Fields().Len(); i++ {
-		fieldDesc := dscrpt.Fields().Get(int(i))
-		field := dscrpt.Fields().ByNumber(protowire.Number(i + 1))
+	desc := reflection.Descriptor()
+	for i := 0; i < desc.Fields().Len(); i++ {
+		fieldDesc := desc.Fields().Get(int(i))
+		field := desc.Fields().ByNumber(protowire.Number(i + 1))
 		switch fieldDesc.Kind() {
 		case protoreflect.Int32Kind:
 			typeValue, err := strconv.ParseInt(row[i], 10, 32)
@@ -162,7 +162,11 @@ func ParseFromString(message proto.Message, row []string) {
 		case protoreflect.MessageKind:
 			if row[i] != "" {
 				subMessage := reflection.Mutable(field).Message()
-				proto.Unmarshal([]byte(row[i]), proto.MessageV1(subMessage))
+				err := proto.Unmarshal([]byte(row[i]), proto.MessageV1(subMessage))
+				if err != nil {
+					log.Println(err)
+					return
+				}
 			}
 		}
 	}
@@ -324,8 +328,8 @@ func EscapeStringQuotes(buf []byte, v string) []byte {
 	return buf[:pos]
 }
 
-func (m *MessageTableInfo) GetCreateTableSqlStmt() string {
-	sql := "CREATE TABLE IF NOT EXISTS " + m.tableName
+func (m *MessageTable) GetCreateTableSqlStmt() string {
+	stmt := "CREATE TABLE IF NOT EXISTS " + m.tableName
 
 	if m.options.Has(dbprotooption.E_OptionPrimaryKey.TypeDescriptor()) {
 		v := m.options.Get(dbprotooption.E_OptionPrimaryKey.TypeDescriptor())
@@ -339,49 +343,49 @@ func (m *MessageTableInfo) GetCreateTableSqlStmt() string {
 		m.uniqueKeys = m.options.Get(dbprotooption.E_OptionUniqueKey.TypeDescriptor()).String()
 	}
 	m.autoIncreaseKey = m.options.Get(dbprotooption.E_OptionAutoIncrementKey.TypeDescriptor()).String()
-	sql += " ("
+	stmt += " ("
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		field := m.Descriptor.Fields().Get(i)
 		if needComma {
-			sql += ", "
+			stmt += ", "
 		} else {
 			needComma = true
 		}
-		sql += string(field.Name())
-		sql += " "
-		sql += MysqlFieldDescriptorType[field.Kind()]
+		stmt += string(field.Name())
+		stmt += " "
+		stmt += MysqlFieldDescriptorType[field.Kind()]
 		if i == kPrimaryKeyIndex {
-			sql += " NOT NULL"
+			stmt += " NOT NULL"
 		}
 		if string(field.Name()) == m.autoIncreaseKey {
-			sql += " AUTO_INCREMENT"
+			stmt += " AUTO_INCREMENT"
 		}
 	}
-	sql += ", PRIMARY KEY ("
-	sql += m.primaryKey[kPrimaryKeyIndex]
-	sql += ")"
+	stmt += ", PRIMARY KEY ("
+	stmt += m.primaryKey[kPrimaryKeyIndex]
+	stmt += ")"
 
 	if len(m.uniqueKeys) > 0 {
-		sql += ", UNIQUE KEY ("
-		sql += m.uniqueKeys
-		sql += ")"
+		stmt += ", UNIQUE KEY ("
+		stmt += m.uniqueKeys
+		stmt += ")"
 	}
 	for _, index := range m.indexes {
-		sql += ", INDEX ("
-		sql += index
-		sql += ")"
+		stmt += ", INDEX ("
+		stmt += index
+		stmt += ")"
 	}
-	sql += ") ENGINE = INNODB"
+	stmt += ") ENGINE = INNODB"
 	if m.autoIncreaseKey != "" {
-		sql += " AUTO_INCREMENT=1"
+		stmt += " AUTO_INCREMENT=1"
 	}
-	sql += " default charset = utf8mb4 "
-	return sql
+	stmt += " default charset = utf8mb4 "
+	return stmt
 }
 
-func (m *MessageTableInfo) GetAlterTableAddFieldSqlStmt() string {
-	sql := "ALTER TABLE " + m.tableName
+func (m *MessageTable) GetAlterTableAddFieldSqlStmt() string {
+	stmt := "ALTER TABLE " + m.tableName
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		field := m.Descriptor.Fields().Get(i)
 		sqlFieldName, ok := m.fields[i]
@@ -389,107 +393,107 @@ func (m *MessageTableInfo) GetAlterTableAddFieldSqlStmt() string {
 		if ok && sqlFieldName == fieldName {
 			continue
 		}
-		sql += " ADD COLUMN "
-		sql += string(field.Name())
-		sql += " "
-		sql += MysqlFieldDescriptorType[field.Kind()]
+		stmt += " ADD COLUMN "
+		stmt += string(field.Name())
+		stmt += " "
+		stmt += MysqlFieldDescriptorType[field.Kind()]
 		if i+1 < m.Descriptor.Fields().Len() {
-			sql += ","
+			stmt += ","
 		}
 	}
-	sql += ";"
-	return sql
+	stmt += ";"
+	return stmt
 }
 
-func (m *MessageTableInfo) GetInsertSqlStmt(message proto.Message, db *sql.DB) string {
-	sql := m.insertInfoStmt + "("
+func (m *MessageTable) GetInsertSqlStmt(message proto.Message) string {
+	stmt := m.insertStmt + "("
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
-			sql += ", "
+			stmt += ", "
 		} else {
 			needComma = true
 		}
 		fieldDesc := m.Descriptor.Fields().Get(i)
 		value := SerializeFieldAsString(message, fieldDesc)
-		sql += "'" + value + "'"
+		stmt += "'" + value + "'"
 	}
-	sql += ")"
-	return sql
+	stmt += ")"
+	return stmt
 }
 
-func (m *MessageTableInfo) GetInsertOnDupUpdateSqlStmt(message proto.Message, db *sql.DB) string {
-	sql := m.GetInsertSqlStmt(message, db)
-	sql += " ON DUPLICATE KEY UPDATE "
-	sql += m.GetUpdateSetStmt(message, db)
-	return sql
+func (m *MessageTable) GetInsertOnDupUpdateSqlStmt(message proto.Message, db *sql.DB) string {
+	stmt := m.GetInsertSqlStmt(message)
+	stmt += " ON DUPLICATE KEY UPDATE "
+	stmt += m.GetUpdateSetStmt(message)
+	return stmt
 }
 
-func (m *MessageTableInfo) GetInsertOnDupKeyForPrimaryKeyStmt(message proto.Message, db *sql.DB) string {
-	sql := m.GetInsertSqlStmt(message, db)
-	sql += " ON DUPLICATE KEY UPDATE "
-	sql += " " + string(m.primaryKeyField.Name())
+func (m *MessageTable) GetInsertOnDupKeyForPrimaryKeyStmt(message proto.Message, db *sql.DB) string {
+	stmt := m.GetInsertSqlStmt(message)
+	stmt += " ON DUPLICATE KEY UPDATE "
+	stmt += " " + string(m.primaryKeyField.Name())
 	value := SerializeFieldAsString(message, m.primaryKeyField)
-	sql += "="
-	sql += "'" + value + "';"
-	return sql
+	stmt += "="
+	stmt += "'" + value + "';"
+	return stmt
 }
 
-func (m *MessageTableInfo) GetSelectSqlByKVWhereStmt(whereType, whereVal string) string {
-	sql := m.getSelectFieldsFromTableSqlStmt()
-	sql += " WHERE "
-	sql += whereType
-	sql += " = '"
-	sql += whereVal
-	sql += "';"
-	return sql
+func (m *MessageTable) GetSelectSqlByKVWhereStmt(whereType, whereVal string) string {
+	stmt := m.getSelectFieldsFromTableSqlStmt()
+	stmt += " WHERE "
+	stmt += whereType
+	stmt += " = '"
+	stmt += whereVal
+	stmt += "';"
+	return stmt
 }
 
-func (m *MessageTableInfo) GetSelectSqlStmt() string {
+func (m *MessageTable) GetSelectSqlStmt() string {
 	return m.selectAllSqlStmt
 }
 
-func (m *MessageTableInfo) GetSelectSqlStmtNoEndSemicolon() string {
+func (m *MessageTable) GetSelectSqlStmtNoEndSemicolon() string {
 	return m.selectAllSqlStmtNoEndSemicolon
 }
 
-func (m *MessageTableInfo) getFieldsSqlStmt() string {
+func (m *MessageTable) getFieldsSqlStmt() string {
 	return m.fieldsSqlStmt
 }
 
-func (m *MessageTableInfo) getSelectFieldsFromTableSqlStmt() string {
+func (m *MessageTable) getSelectFieldsFromTableSqlStmt() string {
 	return m.selectFieldsFromTableSqlStmt
 }
 
-func (m *MessageTableInfo) GetSelectSqlWithWhereClause(whereClause string) string {
-	sql := m.getSelectFieldsFromTableSqlStmt()
-	sql += " WHERE "
-	sql += whereClause
-	sql += ";"
-	return sql
+func (m *MessageTable) GetSelectSqlWithWhereClause(whereClause string) string {
+	stmt := m.getSelectFieldsFromTableSqlStmt()
+	stmt += " WHERE "
+	stmt += whereClause
+	stmt += ";"
+	return stmt
 }
 
-func (m *MessageTableInfo) GetDeleteSql(message proto.Message, db *sql.DB) string {
-	sql := "DELETE  FROM "
-	sql += m.tableName
-	sql += " WHERE "
-	sql += string(m.Descriptor.Fields().Get(kPrimaryKeyIndex).Name())
+func (m *MessageTable) GetDeleteSql(message proto.Message, db *sql.DB) string {
+	stmt := "DELETE  FROM "
+	stmt += m.tableName
+	stmt += " WHERE "
+	stmt += string(m.Descriptor.Fields().Get(kPrimaryKeyIndex).Name())
 	value := SerializeFieldAsString(message, m.primaryKeyField)
-	sql += " = '"
-	sql += value
-	sql += "'"
-	return sql
+	stmt += " = '"
+	stmt += value
+	stmt += "'"
+	return stmt
 }
 
-func (m *MessageTableInfo) GetDeleteSqlWithWhereClause(whereClause string, db *sql.DB) string {
-	sql := "DELETE FROM "
-	sql += m.tableName
-	sql += " WHERE "
-	sql += whereClause
-	return sql
+func (m *MessageTable) GetDeleteSqlWithWhereClause(whereClause string) string {
+	stmt := "DELETE FROM "
+	stmt += m.tableName
+	stmt += " WHERE "
+	stmt += whereClause
+	return stmt
 }
 
-func (m *MessageTableInfo) GetReplaceIntoSql(message proto.Message, db *sql.DB) string {
+func (m *MessageTable) GetReplaceIntoSql(message proto.Message) string {
 	sql := m.replaceSqlIntoStmt
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
@@ -506,52 +510,52 @@ func (m *MessageTableInfo) GetReplaceIntoSql(message proto.Message, db *sql.DB) 
 	return sql
 }
 
-func (m *MessageTableInfo) GetUpdateSetStmt(message proto.Message, db *sql.DB) string {
-	sql := ""
+func (m *MessageTable) GetUpdateSetStmt(message proto.Message) string {
+	stmt := ""
 	needComma := false
 	reflection := proto.MessageReflect(message)
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		field := m.Descriptor.Fields().Get(i)
 		if reflection.Has(field) {
 			if needComma {
-				sql += ", "
+				stmt += ", "
 			} else {
 				needComma = true
 			}
-			sql += " " + string(field.Name())
+			stmt += " " + string(field.Name())
 			value := SerializeFieldAsString(message, field)
-			sql += "="
-			sql += "'" + value + "'"
+			stmt += "="
+			stmt += "'" + value + "'"
 		}
 	}
-	return sql
+	return stmt
 }
 
-func (m *MessageTableInfo) GetUpdateSql(message proto.Message, db *sql.DB) string {
-	sql := "UPDATE " + m.tableName
-	sql += " SET "
-	sql += m.GetUpdateSetStmt(message, db)
-	sql += " WHERE "
+func (m *MessageTable) GetUpdateSql(message proto.Message, db *sql.DB) string {
+	stmt := "UPDATE " + m.tableName
+	stmt += " SET "
+	stmt += m.GetUpdateSetStmt(message)
+	stmt += " WHERE "
 	needComma := false
 	for _, primaryKey := range m.primaryKey {
 		field := m.Descriptor.Fields().ByName(protoreflect.Name(primaryKey))
 		if nil != field {
 			if needComma {
-				sql += " AND "
+				stmt += " AND "
 			} else {
 				needComma = true
 			}
-			sql += primaryKey
+			stmt += primaryKey
 			value := SerializeFieldAsString(message, field)
-			sql += "='"
-			sql += value
-			sql += "'"
+			stmt += "='"
+			stmt += value
+			stmt += "'"
 		}
 	}
-	return sql
+	return stmt
 }
 
-func (m *MessageTableInfo) Init() {
+func (m *MessageTable) Init() {
 
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
@@ -573,10 +577,10 @@ func (m *MessageTableInfo) Init() {
 
 	m.replaceSqlIntoStmt = "REPLACE INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES ("
 
-	m.insertInfoStmt = "INSERT INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES "
+	m.insertStmt = "INSERT INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES "
 }
 
-func (m *MessageTableInfo) GetUpdateSqlWithWhereClause(message proto.Message, db *sql.DB, whereClause string) string {
+func (m *MessageTable) GetUpdateSqlWithWhereClause(message proto.Message, whereClause string) string {
 	sql := "UPDATE " + m.tableName
 	needComma := false
 	sql += " SET "
@@ -603,7 +607,7 @@ func (m *MessageTableInfo) GetUpdateSqlWithWhereClause(message proto.Message, db
 
 func NewPb2DbTables() *PbMysqlDB {
 	return &PbMysqlDB{
-		Tables: make(map[string]*MessageTableInfo),
+		Tables: make(map[string]*MessageTable),
 	}
 }
 
@@ -640,7 +644,12 @@ func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
 		fmt.Println(err)
 		return
 	}
-	defer rows.Close()
+	defer func(rows *sql.Rows) {
+		err := rows.Close()
+		if err != nil {
+			log.Println(err)
+		}
+	}(rows)
 
 	fieldIndex := 0
 	var fieldName string
@@ -662,7 +671,7 @@ func (p *PbMysqlDB) Save(message proto.Message) {
 		fmt.Println("table not found")
 		return
 	}
-	_, err := p.DB.Exec(table.GetReplaceIntoSql(message, p.DB))
+	_, err := p.DB.Exec(table.GetReplaceIntoSql(message))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -692,7 +701,11 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 	}
 
 	for rows.Next() {
-		rows.Scan(scans...)
+		err := rows.Scan(scans...)
+		if err != nil {
+			log.Println(err)
+			return
+		}
 		i := 0
 		result := make([]string, len(columns))
 		for _, v := range vals {
@@ -828,7 +841,7 @@ func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string)
 }
 
 func (p *PbMysqlDB) AddMysqlTable(m proto.Message) {
-	p.Tables[GetTableName(m)] = &MessageTableInfo{
+	p.Tables[GetTableName(m)] = &MessageTable{
 		tableName:       GetTableName(m),
 		defaultInstance: m,
 		Descriptor:      GetDescriptor(m),
