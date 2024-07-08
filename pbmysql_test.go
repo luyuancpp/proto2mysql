@@ -86,7 +86,7 @@ func TestAlterTable(t *testing.T) {
 		return
 	}
 
-	pbMySqlDB.AlterTableAddField(&dbprotooption.GolangTest{})
+	pbMySqlDB.UpdateTableField(&dbprotooption.GolangTest{})
 }
 
 func TestLoadSave(t *testing.T) {

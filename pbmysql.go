@@ -629,7 +629,69 @@ func (p *PbMysqlDB) GetCreateTableSql(message proto.Message) string {
 	return table.GetCreateTableSqlStmt()
 }
 
-func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
+func (m *MessageTable) GetAlterTableModifyFieldSqlStmt() string {
+	stmt := "ALTER TABLE " + m.tableName
+	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
+		field := m.Descriptor.Fields().Get(i)
+		sqlFieldName, ok := m.fields[i]
+		fieldName := string(field.Name())
+		if ok && sqlFieldName == fieldName {
+			continue
+		}
+		stmt += " CHANGE  COLUMN "
+		stmt += sqlFieldName
+		stmt += " "
+		stmt += fieldName
+		stmt += " "
+		stmt += MysqlFieldDescriptorType[field.Kind()]
+		stmt += ","
+	}
+	stmt = strings.Trim(stmt, ",")
+	stmt += ";"
+	return stmt
+}
+
+func (p *PbMysqlDB) UpdateTableField(message proto.Message) {
+	p.AlterModifyTableField(message)
+	p.AlterAddTableField(message)
+}
+
+func (p *PbMysqlDB) AlterAddTableField(message proto.Message) {
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		fmt.Println("table not found")
+		return
+	}
+	stmt := fmt.Sprintf("SELECT COLUMN_NAME,ORDINAL_POSITION FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s';",
+		p.DBName,
+		table.tableName)
+
+	rows, err := p.DB.Query(stmt)
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+	defer rows.Close()
+
+	fieldIndex := 0
+	var fieldName string
+
+	for rows.Next() {
+		err = rows.Scan(&fieldName, &fieldIndex)
+		if err != nil {
+			fmt.Println(err)
+			return
+		}
+		table.fields[fieldIndex-1] = fieldName
+	}
+	_, err = p.DB.Exec(table.GetAlterTableAddFieldSqlStmt())
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
+}
+
+func (p *PbMysqlDB) AlterModifyTableField(message proto.Message) {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
 		fmt.Println("table not found")
@@ -644,12 +706,7 @@ func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
 		fmt.Println(err)
 		return
 	}
-	defer func(rows *sql.Rows) {
-		err := rows.Close()
-		if err != nil {
-			log.Println(err)
-		}
-	}(rows)
+	defer rows.Close()
 
 	fieldIndex := 0
 	var fieldName string
@@ -662,7 +719,11 @@ func (p *PbMysqlDB) AlterTableAddField(message proto.Message) {
 		}
 		table.fields[fieldIndex-1] = fieldName
 	}
-	p.DB.Exec(table.GetAlterTableAddFieldSqlStmt())
+	_, err = p.DB.Exec(table.GetAlterTableModifyFieldSqlStmt())
+	if err != nil {
+		fmt.Println(err)
+		return
+	}
 }
 
 func (p *PbMysqlDB) Save(message proto.Message) {
