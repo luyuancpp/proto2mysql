@@ -9,6 +9,12 @@ github.com/luyuancpp/dbprotooption v0.0.3 h1:fR9THTmDepDstdCz2DudrixkE22hN37oHvA
 github.com/luyuancpp/dbprotooption v0.0.3/go.mod h1:jHa9XWA9OsUULiYFAtN+N0iQMiiq8pRjMxFhrWxrCqs=
 github.com/luyuancpp/dbprotooption v0.0.4 h1:qr3531LT0/iCOrFeCaYmjZ8mIzALlSEhddM7fOyo5wk=
 github.com/luyuancpp/dbprotooption v0.0.4/go.mod h1:jHa9XWA9OsUULiYFAtN+N0iQMiiq8pRjMxFhrWxrCqs=
+github.com/luyuancpp/dbprotooption v0.0.5 h1:d8JH/6YYh7ZM/VwgERbtOqf06CFtqi5nr6G8SZl3u0g=
+github.com/luyuancpp/dbprotooption v0.0.5/go.mod h1:jHa9XWA9OsUULiYFAtN+N0iQMiiq8pRjMxFhrWxrCqs=
+github.com/luyuancpp/dbprotooption v0.0.7 h1:c6ilUpkbNzEVpNFhSl5diETfqF5AnxU+CjmFKiKiC8k=
+github.com/luyuancpp/dbprotooption v0.0.7/go.mod h1:jHa9XWA9OsUULiYFAtN+N0iQMiiq8pRjMxFhrWxrCqs=
+github.com/luyuancpp/dbprotooption v0.0.8 h1:JJuO91gyldnewQA5iEG0xoi9CjBXB4XsUfNvi5JbUE8=
+github.com/luyuancpp/dbprotooption v0.0.8/go.mod h1:jHa9XWA9OsUULiYFAtN+N0iQMiiq8pRjMxFhrWxrCqs=
 golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543 h1:E7g+9GITq07hpfrRu66IVDexMakfv52eLZ2CXBWiKr4=
 golang.org/x/xerrors v0.0.0-20191204190536-9bdfabe68543/go.mod h1:I/5z698sn9Ka8TeJc9MKroUUfqBBauWjQqLJ2OPfmY0=
 google.golang.org/protobuf v1.26.0-rc.1/go.mod h1:jlhhOSvTdKEhbULTjvd4ARK9grFBp09yW+WbY/TyQbw=
