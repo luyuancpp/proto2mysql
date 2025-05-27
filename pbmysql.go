@@ -336,7 +336,7 @@ func (m *MessageTable) GetCreateTableSqlStmt() string {
 		m.primaryKey = strings.Split(v.String(), ",")
 	}
 	if m.options.Has(dbprotooption.E_OptionIndex.TypeDescriptor()) {
-		v := m.options.Get(dbprotooption.E_OptionPrimaryKey.TypeDescriptor())
+		v := m.options.Get(dbprotooption.E_OptionIndex.TypeDescriptor())
 		m.indexes = strings.Split(v.String(), ",")
 	}
 	if m.options.Has(dbprotooption.E_OptionUniqueKey.TypeDescriptor()) {
