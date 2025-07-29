@@ -605,7 +605,7 @@ func (m *MessageTable) GetUpdateSqlWithWhereClause(message proto.Message, whereC
 	return sql
 }
 
-func NewPb2DbTables() *PbMysqlDB {
+func NewPbMysqlDB() *PbMysqlDB {
 	return &PbMysqlDB{
 		Tables: make(map[string]*MessageTable),
 	}
@@ -892,7 +892,7 @@ func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string)
 	return nil
 }
 
-func (p *PbMysqlDB) AddMysqlTable(m proto.Message) {
+func (p *PbMysqlDB) RegisterTable(m proto.Message) {
 	p.Tables[GetTableName(m)] = &MessageTable{
 		tableName:       GetTableName(m),
 		defaultInstance: m,

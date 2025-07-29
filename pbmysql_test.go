@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/go-sql-driver/mysql"
-	"github.com/golang/protobuf/proto"
 	"github.com/luyuancpp/dbprotooption"
+	"google.golang.org/protobuf/proto"
 	"log"
 	"os"
 	"testing"
@@ -34,8 +34,8 @@ func GetMysqlConfig() *mysql.Config {
 }
 
 func TestCreateTable(t *testing.T) {
-	pbMySqlDB := NewPb2DbTables()
-	pbMySqlDB.AddMysqlTable(&dbprotooption.GolangTest{})
+	pbMySqlDB := NewPbMysqlDB()
+	pbMySqlDB.RegisterTable(&dbprotooption.GolangTest{})
 
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
@@ -64,8 +64,8 @@ func TestCreateTable(t *testing.T) {
 }
 
 func TestAlterTable(t *testing.T) {
-	pbMySqlDB := NewPb2DbTables()
-	pbMySqlDB.AddMysqlTable(&dbprotooption.GolangTest{})
+	pbMySqlDB := NewPbMysqlDB()
+	pbMySqlDB.RegisterTable(&dbprotooption.GolangTest{})
 
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
@@ -90,7 +90,7 @@ func TestAlterTable(t *testing.T) {
 }
 
 func TestLoadSave(t *testing.T) {
-	pbMySqlDB := NewPb2DbTables()
+	pbMySqlDB := NewPbMysqlDB()
 	pbSave := &dbprotooption.GolangTest{
 		Id:      1,
 		GroupId: 1,
@@ -111,7 +111,7 @@ func TestLoadSave(t *testing.T) {
 			Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
 		},
 	}
-	pbMySqlDB.AddMysqlTable(pbSave)
+	pbMySqlDB.RegisterTable(pbSave)
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
 	if err != nil {
@@ -140,7 +140,7 @@ func TestLoadSave(t *testing.T) {
 }
 
 func TestLoadByWhereCase(t *testing.T) {
-	pbMySqlDB := NewPb2DbTables()
+	pbMySqlDB := NewPbMysqlDB()
 	pbSave := &dbprotooption.GolangTest{
 		Id:      1,
 		GroupId: 1,
@@ -151,7 +151,7 @@ func TestLoadByWhereCase(t *testing.T) {
 			Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
 		},
 	}
-	pbMySqlDB.AddMysqlTable(pbSave)
+	pbMySqlDB.RegisterTable(pbSave)
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
 	if err != nil {
@@ -179,7 +179,7 @@ func TestLoadByWhereCase(t *testing.T) {
 }
 
 func TestLoadSaveList(t *testing.T) {
-	pbMySqlDB := NewPb2DbTables()
+	pbMySqlDB := NewPbMysqlDB()
 	pbSaveList := &dbprotooption.GolangTestList{
 		TestList: []*dbprotooption.GolangTest{
 			{
@@ -204,7 +204,7 @@ func TestLoadSaveList(t *testing.T) {
 			},
 		},
 	}
-	pbMySqlDB.AddMysqlTable(&dbprotooption.GolangTest{})
+	pbMySqlDB.RegisterTable(&dbprotooption.GolangTest{})
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
 	if err != nil {
@@ -232,7 +232,7 @@ func TestLoadSaveList(t *testing.T) {
 }
 
 func TestLoadSaveListWhereCase(t *testing.T) {
-	pbMySqlDB := NewPb2DbTables()
+	pbMySqlDB := NewPbMysqlDB()
 	pbSaveList := &dbprotooption.GolangTestList{
 		TestList: []*dbprotooption.GolangTest{
 			{
@@ -257,7 +257,7 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 			},
 		},
 	}
-	pbMySqlDB.AddMysqlTable(&dbprotooption.GolangTest{})
+	pbMySqlDB.RegisterTable(&dbprotooption.GolangTest{})
 	mysqlConfig := GetMysqlConfig()
 	conn, err := mysql.NewConnector(mysqlConfig)
 	if err != nil {
