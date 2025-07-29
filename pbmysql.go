@@ -656,11 +656,10 @@ func (p *PbMysqlDB) UpdateTableField(message proto.Message) {
 	p.AlterAddTableField(message)
 }
 
-func (p *PbMysqlDB) AlterAddTableField(message proto.Message) {
+func (p *PbMysqlDB) AlterAddTableField(message proto.Message) error {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
-		fmt.Println("table not found")
-		return
+		return fmt.Errorf("table not found")
 	}
 	stmt := fmt.Sprintf("SELECT COLUMN_NAME,ORDINAL_POSITION FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s';",
 		p.DBName,
@@ -668,8 +667,7 @@ func (p *PbMysqlDB) AlterAddTableField(message proto.Message) {
 
 	rows, err := p.DB.Query(stmt)
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	defer rows.Close()
 
@@ -680,22 +678,23 @@ func (p *PbMysqlDB) AlterAddTableField(message proto.Message) {
 		err = rows.Scan(&fieldName, &fieldIndex)
 		if err != nil {
 			fmt.Println(err)
-			return
+			return err
 		}
 		table.fields[fieldIndex-1] = fieldName
 	}
 	_, err = p.DB.Exec(table.GetAlterTableAddFieldSqlStmt())
 	if err != nil {
 		fmt.Println(err)
-		return
+		return err
 	}
+
+	return nil
 }
 
-func (p *PbMysqlDB) AlterModifyTableField(message proto.Message) {
+func (p *PbMysqlDB) AlterModifyTableField(message proto.Message) error {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
-		fmt.Println("table not found")
-		return
+		return fmt.Errorf("table not found")
 	}
 	sqlStmt := fmt.Sprintf("SELECT COLUMN_NAME,ORDINAL_POSITION FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s';",
 		p.DBName,
@@ -703,8 +702,7 @@ func (p *PbMysqlDB) AlterModifyTableField(message proto.Message) {
 
 	rows, err := p.DB.Query(sqlStmt)
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	defer rows.Close()
 
@@ -714,46 +712,43 @@ func (p *PbMysqlDB) AlterModifyTableField(message proto.Message) {
 	for rows.Next() {
 		err = rows.Scan(&fieldName, &fieldIndex)
 		if err != nil {
-			fmt.Println(err)
-			return
+			return err
 		}
 		table.fields[fieldIndex-1] = fieldName
 	}
 	_, err = p.DB.Exec(table.GetAlterTableModifyFieldSqlStmt())
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
+
+	return nil
 }
 
-func (p *PbMysqlDB) Save(message proto.Message) {
+func (p *PbMysqlDB) Save(message proto.Message) error {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
-		fmt.Println("table not found")
-		return
+		return fmt.Errorf("table not found")
 	}
 	_, err := p.DB.Exec(table.GetReplaceIntoSql(message))
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
+
+	return nil
 }
 
-func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereValue string) {
+func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereValue string) error {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
-		fmt.Println("table not found")
-		return
+		return fmt.Errorf("table not found")
 	}
 	rows, err := p.DB.Query(table.GetSelectSqlByKVWhereStmt(whereType, whereValue))
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	columns, err := rows.Columns()
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	vals := make([][]byte, len(columns))
 	scans := make([]interface{}, len(columns))
@@ -764,8 +759,7 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 	for rows.Next() {
 		err := rows.Scan(scans...)
 		if err != nil {
-			log.Println(err)
-			return
+			return err
 		}
 		i := 0
 		result := make([]string, len(columns))
@@ -775,6 +769,7 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 		}
 		ParseFromString(message, result)
 	}
+	return nil
 }
 
 func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) error {
@@ -810,7 +805,7 @@ func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) 
 	return nil
 }
 
-func (p *PbMysqlDB) LoadList(message proto.Message) {
+func (p *PbMysqlDB) LoadList(message proto.Message) error {
 	reflectionParent := proto.MessageReflect(message)
 	md := reflectionParent.Descriptor()
 	fds := md.Fields()
@@ -818,18 +813,15 @@ func (p *PbMysqlDB) LoadList(message proto.Message) {
 	name := string(listField.Message().Name())
 	table, ok := p.Tables[name]
 	if !ok {
-		fmt.Println("table not found")
-		return
+		return fmt.Errorf("table not found")
 	}
 	rows, err := p.DB.Query(table.GetSelectSqlStmt())
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	columns, err := rows.Columns()
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	values := make([][]byte, len(columns))
 	scans := make([]interface{}, len(columns))
@@ -852,9 +844,11 @@ func (p *PbMysqlDB) LoadList(message proto.Message) {
 		ParseFromString(proto.MessageV1(ve.Message()), result)
 		lv.Append(ve)
 	}
+
+	return nil
 }
 
-func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string) {
+func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string) error {
 	reflectionParent := proto.MessageReflect(message)
 	md := reflectionParent.Descriptor()
 	fds := md.Fields()
@@ -862,19 +856,16 @@ func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string)
 	name := string(listField.Message().Name())
 	table, ok := p.Tables[name]
 	if !ok {
-		fmt.Println("table not found")
-		return
+		return fmt.Errorf("table not found")
 	}
 	stm := table.GetSelectSqlStmtNoEndSemicolon() + whereCase + ";"
 	rows, err := p.DB.Query(stm)
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	columns, err := rows.Columns()
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	values := make([][]byte, len(columns))
 	scans := make([]interface{}, len(columns))
@@ -897,6 +888,8 @@ func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string)
 		ParseFromString(proto.MessageV1(ve.Message()), result)
 		lv.Append(ve)
 	}
+
+	return nil
 }
 
 func (p *PbMysqlDB) AddMysqlTable(m proto.Message) {
