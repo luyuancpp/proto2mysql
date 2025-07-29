@@ -97,7 +97,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 	return fieldValue
 }
 
-func ParseFromString(message proto.Message, row []string) {
+func ParseFromString(message proto.Message, row []string) error {
 	reflection := proto.MessageReflect(message)
 	desc := reflection.Descriptor()
 	for i := 0; i < desc.Fields().Len(); i++ {
@@ -107,43 +107,37 @@ func ParseFromString(message proto.Message, row []string) {
 		case protoreflect.Int32Kind:
 			typeValue, err := strconv.ParseInt(row[i], 10, 32)
 			if nil != err {
-				fmt.Println(err)
-				continue
+				return fmt.Errorf("parse failed: %w", err)
 			}
 			reflection.Set(field, protoreflect.ValueOfInt32(int32(typeValue)))
 		case protoreflect.Int64Kind:
 			typeValue, err := strconv.ParseInt(row[i], 10, 64)
 			if nil != err {
-				fmt.Println(err)
-				continue
+				return fmt.Errorf("parse failed: %w", err)
 			}
 			reflection.Set(field, protoreflect.ValueOfInt64(typeValue))
 		case protoreflect.Uint32Kind:
 			typeValue, err := strconv.ParseUint(row[i], 10, 32)
 			if nil != err {
-				fmt.Println(err)
-				continue
+				return fmt.Errorf("parse failed: %w", err)
 			}
 			reflection.Set(field, protoreflect.ValueOfUint32(uint32(typeValue)))
 		case protoreflect.Uint64Kind:
 			typeValue, err := strconv.ParseUint(row[i], 10, 64)
 			if nil != err {
-				fmt.Println(err)
-				continue
+				return fmt.Errorf("parse failed: %w", err)
 			}
 			reflection.Set(field, protoreflect.ValueOfUint64(typeValue))
 		case protoreflect.FloatKind:
 			typeValue, err := strconv.ParseFloat(row[i], 32)
 			if nil != err {
-				fmt.Println(err)
-				continue
+				return fmt.Errorf("parse failed: %w", err)
 			}
 			reflection.Set(field, protoreflect.ValueOfFloat32(float32(typeValue)))
 		case protoreflect.DoubleKind:
 			typeValue, err := strconv.ParseFloat(row[i], 64)
 			if nil != err {
-				fmt.Println(err)
-				continue
+				return fmt.Errorf("parse failed: %w", err)
 			}
 			reflection.Set(field, protoreflect.ValueOfFloat64(typeValue))
 		case protoreflect.StringKind:
@@ -158,8 +152,7 @@ func ParseFromString(message proto.Message, row []string) {
 			if row[i] != "" {
 				typeValue, err := strconv.ParseBool(row[i])
 				if nil != err {
-					fmt.Println(err)
-					continue
+					return fmt.Errorf("parse failed: %w", err)
 				}
 				reflection.Set(field, protoreflect.ValueOfBool(typeValue))
 			} else {
@@ -170,8 +163,7 @@ func ParseFromString(message proto.Message, row []string) {
 				subMessage := reflection.Mutable(field).Message()
 				err := proto.Unmarshal([]byte(row[i]), proto.MessageV1(subMessage))
 				if err != nil {
-					log.Println(err)
-					return
+					return fmt.Errorf("parse failed: %w", err)
 				}
 			}
 		case protoreflect.EnumKind:
@@ -186,6 +178,8 @@ func ParseFromString(message proto.Message, row []string) {
 			reflection.Set(field, protoreflect.ValueOfBytes(b))
 		}
 	}
+
+	return nil
 }
 
 var MysqlFieldDescriptorType = []string{
@@ -781,7 +775,10 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 			result[i] = string(v)
 			i++
 		}
-		ParseFromString(message, result)
+		err = ParseFromString(message, result)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -817,7 +814,10 @@ func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) 
 			result[i] = string(v)
 			i++
 		}
-		ParseFromString(message, result)
+		err = ParseFromString(message, result)
+		if err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -858,7 +858,10 @@ func (p *PbMysqlDB) LoadList(message proto.Message) error {
 			i++
 		}
 		ve := lv.NewElement()
-		ParseFromString(proto.MessageV1(ve.Message()), result)
+		err = ParseFromString(proto.MessageV1(ve.Message()), result)
+		if err != nil {
+			return err
+		}
 		lv.Append(ve)
 	}
 
@@ -902,7 +905,10 @@ func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string)
 			i++
 		}
 		ve := lv.NewElement()
-		ParseFromString(proto.MessageV1(ve.Message()), result)
+		err = ParseFromString(proto.MessageV1(ve.Message()), result)
+		if err != nil {
+			return err
+		}
 		lv.Append(ve)
 	}
 
