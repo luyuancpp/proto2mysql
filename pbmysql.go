@@ -4,9 +4,8 @@ import (
 	"database/sql"
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/golang/protobuf/proto"
 	"github.com/luyuancpp/dbprotooption"
-	"google.golang.org/protobuf/encoding/protowire"
+	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"log"
 	"strconv"
@@ -61,8 +60,9 @@ func (p *PbMysqlDB) OpenDB(db *sql.DB, dbname string) error {
 }
 
 func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor) string {
-	reflection := proto.MessageReflect(message)
-	fieldValue := ""
+	reflection := message.ProtoReflect()
+	var fieldValue string
+
 	switch fieldDesc.Kind() {
 	case protoreflect.Int32Kind:
 		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Int())
@@ -85,97 +85,100 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		fieldValue = fmt.Sprintf("%d", int32(val))
 	case protoreflect.BytesKind:
 		b := reflection.Get(fieldDesc).Bytes()
-		fieldValue = string(EscapeBytesBackslash(nil, b)) // ❌原代码强制转义为字符串
+		fieldValue = string(EscapeBytesBackslash(nil, b))
 	case protoreflect.MessageKind:
 		if reflection.Has(fieldDesc) {
 			subMessage := reflection.Get(fieldDesc).Message()
-			data, _ := proto.Marshal(proto.MessageV1(subMessage))
-			var buf []byte
-			fieldValue = string(EscapeBytesBackslash(buf, data))
+			data, err := proto.Marshal(subMessage.Interface())
+			if err == nil {
+				fieldValue = string(EscapeBytesBackslash(nil, data))
+			} else {
+				fieldValue = "<marshal_error>"
+			}
 		}
 	}
+
 	return fieldValue
 }
 
 func ParseFromString(message proto.Message, row []string) error {
-	reflection := proto.MessageReflect(message)
+	reflection := message.ProtoReflect()
 	desc := reflection.Descriptor()
+
 	for i := 0; i < desc.Fields().Len(); i++ {
-		fieldDesc := desc.Fields().Get(int(i))
-		field := desc.Fields().ByNumber(protowire.Number(i + 1))
-		switch fieldDesc.Kind() {
-		case protoreflect.Int32Kind:
-			typeValue, err := strconv.ParseInt(row[i], 10, 32)
-			if nil != err {
-				return fmt.Errorf("parse failed: %w", err)
-			}
-			reflection.Set(field, protoreflect.ValueOfInt32(int32(typeValue)))
-		case protoreflect.Int64Kind:
-			typeValue, err := strconv.ParseInt(row[i], 10, 64)
-			if nil != err {
-				return fmt.Errorf("parse failed: %w", err)
-			}
-			reflection.Set(field, protoreflect.ValueOfInt64(typeValue))
-		case protoreflect.Uint32Kind:
-			typeValue, err := strconv.ParseUint(row[i], 10, 32)
-			if nil != err {
-				return fmt.Errorf("parse failed: %w", err)
-			}
-			reflection.Set(field, protoreflect.ValueOfUint32(uint32(typeValue)))
-		case protoreflect.Uint64Kind:
-			typeValue, err := strconv.ParseUint(row[i], 10, 64)
-			if nil != err {
-				return fmt.Errorf("parse failed: %w", err)
-			}
-			reflection.Set(field, protoreflect.ValueOfUint64(typeValue))
-		case protoreflect.FloatKind:
-			typeValue, err := strconv.ParseFloat(row[i], 32)
-			if nil != err {
-				return fmt.Errorf("parse failed: %w", err)
-			}
-			reflection.Set(field, protoreflect.ValueOfFloat32(float32(typeValue)))
-		case protoreflect.DoubleKind:
-			typeValue, err := strconv.ParseFloat(row[i], 64)
-			if nil != err {
-				return fmt.Errorf("parse failed: %w", err)
-			}
-			reflection.Set(field, protoreflect.ValueOfFloat64(typeValue))
-		case protoreflect.StringKind:
-			if row[i] == "" {
-				typeValue := ""
-				reflection.Set(field, protoreflect.ValueOfString(typeValue))
-			} else {
-				typeValue := row[i]
-				reflection.Set(field, protoreflect.ValueOfString(typeValue))
-			}
-		case protoreflect.BoolKind:
-			if row[i] != "" {
-				typeValue, err := strconv.ParseBool(row[i])
-				if nil != err {
-					return fmt.Errorf("parse failed: %w", err)
-				}
-				reflection.Set(field, protoreflect.ValueOfBool(typeValue))
-			} else {
-				reflection.Set(field, protoreflect.ValueOfBool(false))
-			}
-		case protoreflect.MessageKind:
-			if row[i] != "" {
-				subMessage := reflection.Mutable(field).Message()
-				err := proto.Unmarshal([]byte(row[i]), proto.MessageV1(subMessage))
+		if i >= len(row) {
+			continue // 忽略超出行长度的字段
+		}
+
+		fieldDesc := desc.Fields().Get(i)
+
+		if !fieldDesc.IsList() && !fieldDesc.IsMap() {
+			switch fieldDesc.Kind() {
+			case protoreflect.Int32Kind:
+				val, err := strconv.ParseInt(row[i], 10, 32)
 				if err != nil {
-					return fmt.Errorf("parse failed: %w", err)
+					return fmt.Errorf("parse int32 failed: %w", err)
+				}
+				reflection.Set(fieldDesc, protoreflect.ValueOfInt32(int32(val)))
+			case protoreflect.Int64Kind:
+				val, err := strconv.ParseInt(row[i], 10, 64)
+				if err != nil {
+					return fmt.Errorf("parse int64 failed: %w", err)
+				}
+				reflection.Set(fieldDesc, protoreflect.ValueOfInt64(val))
+			case protoreflect.Uint32Kind:
+				val, err := strconv.ParseUint(row[i], 10, 32)
+				if err != nil {
+					return fmt.Errorf("parse uint32 failed: %w", err)
+				}
+				reflection.Set(fieldDesc, protoreflect.ValueOfUint32(uint32(val)))
+			case protoreflect.Uint64Kind:
+				val, err := strconv.ParseUint(row[i], 10, 64)
+				if err != nil {
+					return fmt.Errorf("parse uint64 failed: %w", err)
+				}
+				reflection.Set(fieldDesc, protoreflect.ValueOfUint64(val))
+			case protoreflect.FloatKind:
+				val, err := strconv.ParseFloat(row[i], 32)
+				if err != nil {
+					return fmt.Errorf("parse float failed: %w", err)
+				}
+				reflection.Set(fieldDesc, protoreflect.ValueOfFloat32(float32(val)))
+			case protoreflect.DoubleKind:
+				val, err := strconv.ParseFloat(row[i], 64)
+				if err != nil {
+					return fmt.Errorf("parse double failed: %w", err)
+				}
+				reflection.Set(fieldDesc, protoreflect.ValueOfFloat64(val))
+			case protoreflect.StringKind:
+				reflection.Set(fieldDesc, protoreflect.ValueOfString(row[i]))
+			case protoreflect.BoolKind:
+				if row[i] == "" {
+					reflection.Set(fieldDesc, protoreflect.ValueOfBool(false))
+				} else {
+					val, err := strconv.ParseBool(row[i])
+					if err != nil {
+						return fmt.Errorf("parse bool failed: %w", err)
+					}
+					reflection.Set(fieldDesc, protoreflect.ValueOfBool(val))
+				}
+			case protoreflect.EnumKind:
+				val, err := strconv.Atoi(row[i])
+				if err != nil {
+					return fmt.Errorf("parse enum failed: %w", err)
+				}
+				reflection.Set(fieldDesc, protoreflect.ValueOfEnum(protoreflect.EnumNumber(val)))
+			case protoreflect.BytesKind:
+				reflection.Set(fieldDesc, protoreflect.ValueOfBytes([]byte(row[i])))
+			case protoreflect.MessageKind:
+				if row[i] != "" {
+					subMsg := reflection.Mutable(fieldDesc).Message()
+					err := proto.Unmarshal([]byte(row[i]), subMsg.Interface())
+					if err != nil {
+						return fmt.Errorf("unmarshal sub-message failed: %w", err)
+					}
 				}
 			}
-		case protoreflect.EnumKind:
-			enumVal, err := strconv.Atoi(row[i])
-			if err != nil {
-				fmt.Println("enum parse err:", err)
-				continue
-			}
-			reflection.Set(field, protoreflect.ValueOfEnum(protoreflect.EnumNumber(enumVal)))
-		case protoreflect.BytesKind:
-			b := []byte(row[i]) // 👈 row[i] 是 string，但我们将其按原始 byte 使用
-			reflection.Set(field, protoreflect.ValueOfBytes(b))
 		}
 	}
 
@@ -523,7 +526,7 @@ func (m *MessageTable) GetReplaceIntoSql(message proto.Message) string {
 func (m *MessageTable) GetUpdateSetStmt(message proto.Message) string {
 	stmt := ""
 	needComma := false
-	reflection := proto.MessageReflect(message)
+	reflection := message.ProtoReflect()
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		field := m.Descriptor.Fields().Get(i)
 		if reflection.Has(field) {
@@ -622,13 +625,11 @@ func NewPbMysqlDB() *PbMysqlDB {
 }
 
 func GetTableName(m proto.Message) string {
-	reflection := proto.MessageReflect(m)
-	return string(reflection.Descriptor().FullName())
+	return string(m.ProtoReflect().Descriptor().FullName())
 }
 
 func GetDescriptor(m proto.Message) protoreflect.MessageDescriptor {
-	reflection := proto.MessageReflect(m)
-	return reflection.Descriptor()
+	return m.ProtoReflect().Descriptor()
 }
 
 func (p *PbMysqlDB) GetCreateTableSql(message proto.Message) string {
@@ -823,7 +824,7 @@ func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) 
 }
 
 func (p *PbMysqlDB) LoadList(message proto.Message) error {
-	reflectionParent := proto.MessageReflect(message)
+	reflectionParent := message.ProtoReflect()
 	md := reflectionParent.Descriptor()
 	fds := md.Fields()
 	listField := fds.Get(0)
@@ -858,7 +859,7 @@ func (p *PbMysqlDB) LoadList(message proto.Message) error {
 			i++
 		}
 		ve := lv.NewElement()
-		err = ParseFromString(proto.MessageV1(ve.Message()), result)
+		err = ParseFromString(ve.Message().Interface(), result)
 		if err != nil {
 			return err
 		}
@@ -869,7 +870,7 @@ func (p *PbMysqlDB) LoadList(message proto.Message) error {
 }
 
 func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string) error {
-	reflectionParent := proto.MessageReflect(message)
+	reflectionParent := message.ProtoReflect()
 	md := reflectionParent.Descriptor()
 	fds := md.Fields()
 	listField := fds.Get(0)
@@ -905,8 +906,7 @@ func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string)
 			i++
 		}
 		ve := lv.NewElement()
-		err = ParseFromString(proto.MessageV1(ve.Message()), result)
-		if err != nil {
+		if err := ParseFromString(ve.Message().Interface(), result); err != nil {
 			return err
 		}
 		lv.Append(ve)

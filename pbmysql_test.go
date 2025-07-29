@@ -129,11 +129,23 @@ func TestLoadSave(t *testing.T) {
 		return
 	}
 
-	pbMySqlDB.Save(pbSave)
-	pbMySqlDB.Save(pbSave1)
+	err = pbMySqlDB.Save(pbSave)
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+	err = pbMySqlDB.Save(pbSave1)
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
 
 	pbLoad := &dbprotooption.GolangTest{}
-	pbMySqlDB.LoadOneByKV(pbLoad, "id", "1")
+	err = pbMySqlDB.LoadOneByKV(pbLoad, "id", "1")
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
 	if !proto.Equal(pbSave, pbLoad) {
 		log.Fatal("pb not equal")
 	}
@@ -169,10 +181,18 @@ func TestLoadByWhereCase(t *testing.T) {
 		return
 	}
 
-	pbMySqlDB.Save(pbSave)
+	err = pbMySqlDB.Save(pbSave)
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
 
 	pbLoad := &dbprotooption.GolangTest{}
-	pbMySqlDB.LoadOneByWhereCase(pbLoad, "where id=1")
+	err = pbMySqlDB.LoadOneByWhereCase(pbLoad, "where id=1")
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
 	if !proto.Equal(pbSave, pbLoad) {
 		log.Fatal("pb not equal")
 	}
@@ -223,7 +243,11 @@ func TestLoadSaveList(t *testing.T) {
 	}
 
 	pbLoadList := &dbprotooption.GolangTestList{}
-	pbMySqlDB.LoadList(pbLoadList)
+	err = pbMySqlDB.LoadList(pbLoadList)
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
 	if !proto.Equal(pbSaveList, pbLoadList) {
 		fmt.Println(pbSaveList.String())
 		fmt.Println(pbLoadList.String())
@@ -276,7 +300,11 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 	}
 
 	pbLoadList := &dbprotooption.GolangTestList{}
-	pbMySqlDB.LoadListByWhereCase(pbLoadList, "where group_id=1")
+	err = pbMySqlDB.LoadListByWhereCase(pbLoadList, "where group_id=1")
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
 	if !proto.Equal(pbSaveList, pbLoadList) {
 		fmt.Println(pbSaveList.String())
 		fmt.Println(pbLoadList.String())
