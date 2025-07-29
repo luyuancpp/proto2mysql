@@ -777,22 +777,19 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 	}
 }
 
-func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) {
+func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) error {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
-		fmt.Println("table not found")
-		return
+		return fmt.Errorf("table not found")
 	}
 	stm := table.GetSelectSqlStmtNoEndSemicolon() + whereCase + ";"
 	rows, err := p.DB.Query(stm)
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	columns, err := rows.Columns()
 	if err != nil {
-		fmt.Println(err)
-		return
+		return err
 	}
 	vals := make([][]byte, len(columns))
 	scans := make([]interface{}, len(columns))
@@ -810,6 +807,7 @@ func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) 
 		}
 		ParseFromString(message, result)
 	}
+	return nil
 }
 
 func (p *PbMysqlDB) LoadList(message proto.Message) {
