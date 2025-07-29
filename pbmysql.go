@@ -80,6 +80,12 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		fieldValue = fmt.Sprintf("%f", reflection.Get(fieldDesc).Float())
 	case protoreflect.BoolKind:
 		fieldValue = fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool())
+	case protoreflect.EnumKind:
+		val := reflection.Get(fieldDesc).Enum()
+		fieldValue = fmt.Sprintf("%d", int32(val))
+	case protoreflect.BytesKind:
+		b := reflection.Get(fieldDesc).Bytes()
+		fieldValue = string(EscapeBytesBackslash(nil, b)) // ❌原代码强制转义为字符串
 	case protoreflect.MessageKind:
 		if reflection.Has(fieldDesc) {
 			subMessage := reflection.Get(fieldDesc).Message()
@@ -168,6 +174,16 @@ func ParseFromString(message proto.Message, row []string) {
 					return
 				}
 			}
+		case protoreflect.EnumKind:
+			enumVal, err := strconv.Atoi(row[i])
+			if err != nil {
+				fmt.Println("enum parse err:", err)
+				continue
+			}
+			reflection.Set(field, protoreflect.ValueOfEnum(protoreflect.EnumNumber(enumVal)))
+		case protoreflect.BytesKind:
+			b := []byte(row[i]) // 👈 row[i] 是 string，但我们将其按原始 byte 使用
+			reflection.Set(field, protoreflect.ValueOfBytes(b))
 		}
 	}
 }
