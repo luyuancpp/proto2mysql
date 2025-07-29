@@ -33,10 +33,10 @@ type MessageTable struct {
 	selectAllSqlStmt               string
 	selectAllSqlStmtNoEndSemicolon string
 
-	selectFieldsFromTableSqlStmt string
-	fieldsSqlStmt                string
-	replaceSqlIntoStmt           string
-	insertStmt                   string
+	selectFieldsFromTableSQL string
+	fieldsSQL                string
+	replaceSQL               string
+	insertSQL                string
 }
 
 func (m *MessageTable) SetAutoIncrement(autoIncrement uint64) {
@@ -406,7 +406,7 @@ func (m *MessageTable) GetAlterTableAddFieldSqlStmt() string {
 }
 
 func (m *MessageTable) GetInsertSqlStmt(message proto.Message) string {
-	stmt := m.insertStmt + "("
+	stmt := m.insertSQL + "("
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
@@ -458,11 +458,11 @@ func (m *MessageTable) GetSelectSqlStmtNoEndSemicolon() string {
 }
 
 func (m *MessageTable) getFieldsSqlStmt() string {
-	return m.fieldsSqlStmt
+	return m.fieldsSQL
 }
 
 func (m *MessageTable) getSelectFieldsFromTableSqlStmt() string {
-	return m.selectFieldsFromTableSqlStmt
+	return m.selectFieldsFromTableSQL
 }
 
 func (m *MessageTable) GetSelectSqlWithWhereClause(whereClause string) string {
@@ -494,7 +494,7 @@ func (m *MessageTable) GetDeleteSqlWithWhereClause(whereClause string) string {
 }
 
 func (m *MessageTable) GetReplaceIntoSql(message proto.Message) string {
-	sql := m.replaceSqlIntoStmt
+	sql := m.replaceSQL
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
@@ -560,24 +560,24 @@ func (m *MessageTable) Init() {
 	needComma := false
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		if needComma {
-			m.fieldsSqlStmt += ", "
+			m.fieldsSQL += ", "
 		} else {
 			needComma = true
 		}
-		m.fieldsSqlStmt += string(m.Descriptor.Fields().Get(i).Name())
+		m.fieldsSQL += string(m.Descriptor.Fields().Get(i).Name())
 	}
 
-	m.selectFieldsFromTableSqlStmt = "SELECT "
-	m.selectFieldsFromTableSqlStmt += m.fieldsSqlStmt
-	m.selectFieldsFromTableSqlStmt += " FROM "
-	m.selectFieldsFromTableSqlStmt += m.tableName
+	m.selectFieldsFromTableSQL = "SELECT "
+	m.selectFieldsFromTableSQL += m.fieldsSQL
+	m.selectFieldsFromTableSQL += " FROM "
+	m.selectFieldsFromTableSQL += m.tableName
 
 	m.selectAllSqlStmt = m.getSelectFieldsFromTableSqlStmt() + ";"
 	m.selectAllSqlStmtNoEndSemicolon = m.getSelectFieldsFromTableSqlStmt() + " "
 
-	m.replaceSqlIntoStmt = "REPLACE INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES ("
+	m.replaceSQL = "REPLACE INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES ("
 
-	m.insertStmt = "INSERT INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES "
+	m.insertSQL = "INSERT INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES "
 }
 
 func (m *MessageTable) GetUpdateSqlWithWhereClause(message proto.Message, whereClause string) string {
