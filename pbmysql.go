@@ -677,14 +677,12 @@ func (p *PbMysqlDB) AlterAddTableField(message proto.Message) error {
 	for rows.Next() {
 		err = rows.Scan(&fieldName, &fieldIndex)
 		if err != nil {
-			fmt.Println(err)
-			return err
+			return fmt.Errorf("scan row failed: %w", err)
 		}
 		table.fields[fieldIndex-1] = fieldName
 	}
 	_, err = p.DB.Exec(table.GetAlterTableAddFieldSqlStmt())
 	if err != nil {
-		fmt.Println(err)
 		return err
 	}
 
@@ -712,7 +710,7 @@ func (p *PbMysqlDB) AlterModifyTableField(message proto.Message) error {
 	for rows.Next() {
 		err = rows.Scan(&fieldName, &fieldIndex)
 		if err != nil {
-			return err
+			return fmt.Errorf("scan row failed: %w", err)
 		}
 		table.fields[fieldIndex-1] = fieldName
 	}
@@ -759,7 +757,7 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 	for rows.Next() {
 		err := rows.Scan(scans...)
 		if err != nil {
-			return err
+			return fmt.Errorf("scan row failed: %w", err)
 		}
 		i := 0
 		result := make([]string, len(columns))
@@ -793,7 +791,10 @@ func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) 
 	}
 
 	for rows.Next() {
-		rows.Scan(scans...)
+		err := rows.Scan(scans...)
+		if err != nil {
+			return fmt.Errorf("scan row failed: %w", err)
+		}
 		i := 0
 		result := make([]string, len(columns))
 		for _, v := range vals {
@@ -832,7 +833,7 @@ func (p *PbMysqlDB) LoadList(message proto.Message) error {
 	for rows.Next() {
 		err := rows.Scan(scans...)
 		if err != nil {
-			continue
+			return fmt.Errorf("scan row failed: %w", err)
 		}
 		i := 0
 		result := make([]string, len(columns))
@@ -876,7 +877,7 @@ func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string)
 	for rows.Next() {
 		err := rows.Scan(scans...)
 		if err != nil {
-			continue
+			return fmt.Errorf("scan row failed: %w", err)
 		}
 		i := 0
 		result := make([]string, len(columns))
