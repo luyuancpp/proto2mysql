@@ -462,6 +462,50 @@ func (m *MessageTable) GetSelectSqlByKVWhereStmt(whereType, whereVal string) str
 	return stmt
 }
 
+// 获取添加字段的 SQL 语句
+func (m *MessageTable) GetAlterTableAddFieldSqlStmt1() string {
+	stmt := "ALTER TABLE " + m.tableName + " ADD COLUMN "
+
+	// 为每个字段生成 ADD COLUMN 语句
+	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
+		field := m.Descriptor.Fields().Get(i)
+		stmt += string(field.Name()) + " " + MysqlFieldDescriptorType[field.Kind()] + ", "
+	}
+
+	stmt = strings.TrimSuffix(stmt, ", ")
+	stmt += ";"
+	return stmt
+}
+
+// 获取插入数据的 SQL 语句
+func (m *MessageTable) GetInsertSqlStmt1(message proto.Message) string {
+	stmt := "INSERT INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES ("
+	values := []string{}
+	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
+		fieldDesc := m.Descriptor.Fields().Get(i)
+		value := SerializeFieldAsString(message, fieldDesc)
+		values = append(values, "'"+value+"'")
+	}
+	stmt += strings.Join(values, ", ") + ")"
+	return stmt
+}
+
+// 获取更新数据的 SQL 语句
+func (m *MessageTable) GetUpdateSqlStmt(message proto.Message) string {
+	stmt := "UPDATE " + m.tableName + " SET "
+	setClause := []string{}
+
+	// 为每个字段生成 SET 子句
+	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
+		fieldDesc := m.Descriptor.Fields().Get(i)
+		value := SerializeFieldAsString(message, fieldDesc)
+		setClause = append(setClause, string(fieldDesc.Name())+"='"+value+"'")
+	}
+
+	stmt += strings.Join(setClause, ", ") + " WHERE " + m.primaryKey[0] + " = ?;"
+	return stmt
+}
+
 func (m *MessageTable) GetSelectSqlStmt() string {
 	return m.selectAllSqlStmt
 }
@@ -662,9 +706,16 @@ func (m *MessageTable) GetAlterTableModifyFieldSqlStmt() string {
 	return stmt
 }
 
-func (p *PbMysqlDB) UpdateTableField(message proto.Message) {
-	p.AlterModifyTableField(message)
-	p.AlterAddTableField(message)
+func (p *PbMysqlDB) UpdateTableField(message proto.Message) error {
+	err := p.AlterModifyTableField(message)
+	if err != nil {
+		return err
+	}
+	err = p.AlterAddTableField(message)
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (p *PbMysqlDB) AlterAddTableField(message proto.Message) error {
