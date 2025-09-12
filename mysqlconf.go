@@ -1,4 +1,4 @@
-package pbmysql_go
+package protobuf_to_mysql
 
 import (
 	"github.com/go-sql-driver/mysql"
