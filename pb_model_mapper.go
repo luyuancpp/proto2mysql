@@ -368,9 +368,6 @@ func (m *MessageTable) GetCreateTableSqlStmt() string {
 		stmt += string(field.Name())
 		stmt += " "
 		stmt += MysqlFieldDescriptorType[field.Kind()]
-		if i == kPrimaryKeyIndex {
-			stmt += " NOT NULL"
-		}
 		if string(field.Name()) == m.autoIncreaseKey {
 			stmt += " AUTO_INCREMENT"
 		}
