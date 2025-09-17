@@ -342,8 +342,10 @@ func EscapeStringQuotes(buf []byte, v string) []byte {
 }
 
 func (m *MessageTable) GetCreateTableSqlStmt() string {
-	stmt := "CREATE TABLE IF NOT EXISTS " + m.tableName
+	// 1. 基础表结构开头（表名），换行后加左括号
+	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", m.tableName)
 
+	// 2. 解析表选项（主键、索引、唯一键、自增键）
 	if m.options.Has(dbprotooption.E_OptionPrimaryKey.TypeDescriptor()) {
 		v := m.options.Get(dbprotooption.E_OptionPrimaryKey.TypeDescriptor())
 		m.primaryKey = strings.Split(v.String(), ",")
@@ -356,41 +358,64 @@ func (m *MessageTable) GetCreateTableSqlStmt() string {
 		m.uniqueKeys = m.options.Get(dbprotooption.E_OptionUniqueKey.TypeDescriptor()).String()
 	}
 	m.autoIncreaseKey = m.options.Get(dbprotooption.E_OptionAutoIncrementKey.TypeDescriptor()).String()
-	stmt += " ("
+
+	// 3. 生成字段定义（缩进1级，每个字段占一行）
 	needComma := false
+	fieldIndent := "\t" // 字段缩进（1个制表符，可改为2/4个空格）
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		field := m.Descriptor.Fields().Get(i)
+		fieldName := string(field.Name())
+		fieldType := MysqlFieldDescriptorType[field.Kind()]
+
+		// 字段间添加逗号（除第一个字段外）
 		if needComma {
-			stmt += ", "
+			stmt += ",\n"
 		} else {
 			needComma = true
 		}
-		stmt += string(field.Name())
+
+		// 拼接字段：缩进 + 字段名 + 空格 + 类型 + 自增约束
+		stmt += fieldIndent
+		stmt += fieldName
 		stmt += " "
-		stmt += MysqlFieldDescriptorType[field.Kind()]
-		if string(field.Name()) == m.autoIncreaseKey {
+		stmt += fieldType
+		if fieldName == m.autoIncreaseKey {
 			stmt += " AUTO_INCREMENT"
 		}
 	}
-	stmt += ", PRIMARY KEY ("
-	stmt += m.primaryKey[kPrimaryKeyIndex]
-	stmt += ")"
 
+	// 4. 生成主键约束（换行 + 缩进，单独占一行）
+	if len(m.primaryKey) > 0 {
+		stmt += ",\n"
+		stmt += fieldIndent
+		stmt += fmt.Sprintf("PRIMARY KEY (%s)", m.primaryKey[kPrimaryKeyIndex])
+	}
+
+	// 5. 生成唯一键约束（换行 + 缩进，单独占一行）
 	if len(m.uniqueKeys) > 0 {
-		stmt += ", UNIQUE KEY ("
-		stmt += m.uniqueKeys
-		stmt += ")"
+		stmt += ",\n"
+		stmt += fieldIndent
+		stmt += fmt.Sprintf("UNIQUE KEY (%s)", m.uniqueKeys)
 	}
+
+	// 6. 生成普通索引约束（每个索引单独占一行）
 	for _, index := range m.indexes {
-		stmt += ", INDEX ("
-		stmt += index
-		stmt += ")"
+		if index == "" {
+			continue
+		}
+		stmt += ",\n"
+		stmt += fieldIndent
+		stmt += fmt.Sprintf("INDEX (%s)", index)
 	}
+
+	// 7. 表选项（引擎、自增起始值、字符集），换行后与表名对齐
+	stmt += "\n"
 	stmt += ") ENGINE = INNODB"
 	if m.autoIncreaseKey != "" {
 		stmt += " AUTO_INCREMENT=1"
 	}
-	stmt += " default charset = utf8mb4 "
+	stmt += " DEFAULT CHARSET = utf8mb4;" // 规范：关键字大写，加结尾分号
+
 	return stmt
 }
 
