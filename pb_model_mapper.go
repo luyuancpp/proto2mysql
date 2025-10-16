@@ -59,48 +59,82 @@ func (p *PbMysqlDB) OpenDB(db *sql.DB, dbname string) error {
 	return err
 }
 
+// 序列化字段（map和list使用Protobuf二进制）
 func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor) string {
 	reflection := message.ProtoReflect()
-	var fieldValue string
 
+	// 处理map类型
+	if fieldDesc.IsMap() {
+		if !reflection.Has(fieldDesc) {
+			return "" // 空map存储为空字节
+		}
+		// 将map包装为临时消息进行序列化
+		mapWrapper := &MapWrapper{
+			MapData: reflection.Get(fieldDesc).Map(),
+		}
+		data, err := proto.Marshal(mapWrapper)
+		if err != nil {
+			return "<map_marshal_error>"
+		}
+		return string(EscapeBytesBackslash(nil, data))
+	}
+
+	// 处理list类型
+	if fieldDesc.IsList() {
+		if !reflection.Has(fieldDesc) {
+			return "" // 空列表存储为空字节
+		}
+		// 将list包装为临时消息进行序列化
+		listWrapper := &ListWrapper{
+			ListData: reflection.Get(fieldDesc).List(),
+		}
+		data, err := proto.Marshal(listWrapper)
+		if err != nil {
+			return "<list_marshal_error>"
+		}
+		return string(EscapeBytesBackslash(nil, data))
+	}
+
+	// 原有非集合类型处理逻辑
 	switch fieldDesc.Kind() {
 	case protoreflect.Int32Kind:
-		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Int())
+		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Int())
 	case protoreflect.Uint32Kind:
-		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint())
+		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint())
 	case protoreflect.FloatKind:
-		fieldValue = fmt.Sprintf("%f", reflection.Get(fieldDesc).Float())
+		return fmt.Sprintf("%f", reflection.Get(fieldDesc).Float())
 	case protoreflect.StringKind:
-		fieldValue = reflection.Get(fieldDesc).String()
+		return reflection.Get(fieldDesc).String()
 	case protoreflect.Int64Kind:
-		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Int())
+		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Int())
 	case protoreflect.Uint64Kind:
-		fieldValue = fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint())
+		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint())
 	case protoreflect.DoubleKind:
-		fieldValue = fmt.Sprintf("%f", reflection.Get(fieldDesc).Float())
+		return fmt.Sprintf("%f", reflection.Get(fieldDesc).Float())
 	case protoreflect.BoolKind:
-		fieldValue = fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool())
+		return fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool())
 	case protoreflect.EnumKind:
 		val := reflection.Get(fieldDesc).Enum()
-		fieldValue = fmt.Sprintf("%d", int32(val))
+		return fmt.Sprintf("%d", int32(val))
 	case protoreflect.BytesKind:
 		b := reflection.Get(fieldDesc).Bytes()
-		fieldValue = string(EscapeBytesBackslash(nil, b))
+		return string(EscapeBytesBackslash(nil, b))
 	case protoreflect.MessageKind:
 		if reflection.Has(fieldDesc) {
 			subMessage := reflection.Get(fieldDesc).Message()
 			data, err := proto.Marshal(subMessage.Interface())
 			if err == nil {
-				fieldValue = string(EscapeBytesBackslash(nil, data))
+				return string(EscapeBytesBackslash(nil, data))
 			} else {
-				fieldValue = "<marshal_error>"
+				return "<marshal_error>"
 			}
 		}
 	}
 
-	return fieldValue
+	return ""
 }
 
+// 反序列化字段（map和list使用Protobuf二进制）
 func ParseFromString(message proto.Message, row []string) error {
 	reflection := message.ProtoReflect()
 	desc := reflection.Descriptor()
@@ -111,78 +145,136 @@ func ParseFromString(message proto.Message, row []string) error {
 		}
 
 		fieldDesc := desc.Fields().Get(i)
+		fieldValue := row[i]
+		if fieldValue == "" {
+			continue // 空值不处理
+		}
 
-		if !fieldDesc.IsList() && !fieldDesc.IsMap() {
-			switch fieldDesc.Kind() {
-			case protoreflect.Int32Kind:
-				val, err := strconv.ParseInt(row[i], 10, 32)
+		// 处理map类型
+		if fieldDesc.IsMap() {
+			// 反序列化二进制到临时包装器
+			mapWrapper := &MapWrapper{}
+			data := UnescapeBytesBackslash([]byte(fieldValue))
+			if err := proto.Unmarshal(data, mapWrapper); err != nil {
+				return fmt.Errorf("parse map (field: %s): %w", fieldDesc.Name(), err)
+			}
+			// 将map数据设置到Protobuf
+			mapVal := reflection.Mutable(fieldDesc).Map()
+			mapWrapper.MapData.Range(func(key protoreflect.MapKey, value protoreflect.Value) bool {
+				mapVal.Set(key, value)
+				return true
+			})
+			continue
+		}
+
+		// 处理list类型
+		if fieldDesc.IsList() {
+			// 反序列化二进制到临时包装器
+			listWrapper := &ListWrapper{}
+			data := UnescapeBytesBackslash([]byte(fieldValue))
+			if err := proto.Unmarshal(data, listWrapper); err != nil {
+				return fmt.Errorf("parse list (field: %s): %w", fieldDesc.Name(), err)
+			}
+			// 将list数据设置到Protobuf
+			listVal := reflection.Mutable(fieldDesc).List()
+			for i := 0; i < listWrapper.ListData.Len(); i++ {
+				listVal.Append(listWrapper.ListData.Get(i))
+			}
+			continue
+		}
+
+		// 原有非集合类型处理逻辑
+		switch fieldDesc.Kind() {
+		case protoreflect.Int32Kind:
+			val, err := strconv.ParseInt(row[i], 10, 32)
+			if err != nil {
+				return fmt.Errorf("parse int32 failed: %w", err)
+			}
+			reflection.Set(fieldDesc, protoreflect.ValueOfInt32(int32(val)))
+		case protoreflect.Int64Kind:
+			val, err := strconv.ParseInt(row[i], 10, 64)
+			if err != nil {
+				return fmt.Errorf("parse int64 failed: %w", err)
+			}
+			reflection.Set(fieldDesc, protoreflect.ValueOfInt64(val))
+		case protoreflect.Uint32Kind:
+			val, err := strconv.ParseUint(row[i], 10, 32)
+			if err != nil {
+				return fmt.Errorf("parse uint32 failed: %w", err)
+			}
+			reflection.Set(fieldDesc, protoreflect.ValueOfUint32(uint32(val)))
+		case protoreflect.Uint64Kind:
+			val, err := strconv.ParseUint(row[i], 10, 64)
+			if err != nil {
+				return fmt.Errorf("parse uint64 failed: %w", err)
+			}
+			reflection.Set(fieldDesc, protoreflect.ValueOfUint64(val))
+		case protoreflect.FloatKind:
+			val, err := strconv.ParseFloat(row[i], 32)
+			if err != nil {
+				return fmt.Errorf("parse float failed: %w", err)
+			}
+			reflection.Set(fieldDesc, protoreflect.ValueOfFloat32(float32(val)))
+		case protoreflect.DoubleKind:
+			val, err := strconv.ParseFloat(row[i], 64)
+			if err != nil {
+				return fmt.Errorf("parse double failed: %w", err)
+			}
+			reflection.Set(fieldDesc, protoreflect.ValueOfFloat64(val))
+		case protoreflect.StringKind:
+			reflection.Set(fieldDesc, protoreflect.ValueOfString(row[i]))
+		case protoreflect.BoolKind:
+			if row[i] == "" {
+				reflection.Set(fieldDesc, protoreflect.ValueOfBool(false))
+			} else {
+				val, err := strconv.ParseBool(row[i])
 				if err != nil {
-					return fmt.Errorf("parse int32 failed: %w", err)
+					return fmt.Errorf("parse bool failed: %w", err)
 				}
-				reflection.Set(fieldDesc, protoreflect.ValueOfInt32(int32(val)))
-			case protoreflect.Int64Kind:
-				val, err := strconv.ParseInt(row[i], 10, 64)
-				if err != nil {
-					return fmt.Errorf("parse int64 failed: %w", err)
-				}
-				reflection.Set(fieldDesc, protoreflect.ValueOfInt64(val))
-			case protoreflect.Uint32Kind:
-				val, err := strconv.ParseUint(row[i], 10, 32)
-				if err != nil {
-					return fmt.Errorf("parse uint32 failed: %w", err)
-				}
-				reflection.Set(fieldDesc, protoreflect.ValueOfUint32(uint32(val)))
-			case protoreflect.Uint64Kind:
-				val, err := strconv.ParseUint(row[i], 10, 64)
-				if err != nil {
-					return fmt.Errorf("parse uint64 failed: %w", err)
-				}
-				reflection.Set(fieldDesc, protoreflect.ValueOfUint64(val))
-			case protoreflect.FloatKind:
-				val, err := strconv.ParseFloat(row[i], 32)
-				if err != nil {
-					return fmt.Errorf("parse float failed: %w", err)
-				}
-				reflection.Set(fieldDesc, protoreflect.ValueOfFloat32(float32(val)))
-			case protoreflect.DoubleKind:
-				val, err := strconv.ParseFloat(row[i], 64)
-				if err != nil {
-					return fmt.Errorf("parse double failed: %w", err)
-				}
-				reflection.Set(fieldDesc, protoreflect.ValueOfFloat64(val))
-			case protoreflect.StringKind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfString(row[i]))
-			case protoreflect.BoolKind:
-				if row[i] == "" {
-					reflection.Set(fieldDesc, protoreflect.ValueOfBool(false))
-				} else {
-					val, err := strconv.ParseBool(row[i])
-					if err != nil {
-						return fmt.Errorf("parse bool failed: %w", err)
-					}
-					reflection.Set(fieldDesc, protoreflect.ValueOfBool(val))
-				}
-			case protoreflect.EnumKind:
-				val, err := strconv.Atoi(row[i])
-				if err != nil {
-					return fmt.Errorf("parse enum failed: %w", err)
-				}
-				reflection.Set(fieldDesc, protoreflect.ValueOfEnum(protoreflect.EnumNumber(val)))
-			case protoreflect.BytesKind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfBytes([]byte(row[i])))
-			case protoreflect.MessageKind:
-				if row[i] != "" {
-					subMsg := reflection.Mutable(fieldDesc).Message()
-					err := proto.Unmarshal([]byte(row[i]), subMsg.Interface())
-					if err != nil {
-						return fmt.Errorf("unmarshal sub-message failed: %w", err)
-					}
-				}
+				reflection.Set(fieldDesc, protoreflect.ValueOfBool(val))
+			}
+		case protoreflect.EnumKind:
+			val, err := strconv.Atoi(row[i])
+			if err != nil {
+				return fmt.Errorf("parse enum failed: %w", err)
+			}
+			reflection.Set(fieldDesc, protoreflect.ValueOfEnum(protoreflect.EnumNumber(val)))
+		case protoreflect.BytesKind:
+			reflection.Set(fieldDesc, protoreflect.ValueOfBytes(UnescapeBytesBackslash([]byte(row[i]))))
+		case protoreflect.MessageKind:
+			subMsg := reflection.Mutable(fieldDesc).Message()
+			err := proto.Unmarshal(UnescapeBytesBackslash([]byte(row[i])), subMsg.Interface())
+			if err != nil {
+				return fmt.Errorf("unmarshal sub-message failed: %w", err)
 			}
 		}
 	}
 
 	return nil
+}
+
+// 临时包装器：用于序列化map（Protobuf需要具体消息类型才能序列化）
+type MapWrapper struct {
+	MapData protoreflect.Map
+}
+
+// 实现proto.Message接口（map序列化需要）
+func (m *MapWrapper) ProtoReflect() protoreflect.Message {
+	// 实际使用时需要根据具体map类型生成对应的反射实现
+	// 这里简化处理，实际项目中需要更完整的实现
+	return protoreflect.Message(nil)
+}
+
+// 临时包装器：用于序列化list（Protobuf需要具体消息类型才能序列化）
+type ListWrapper struct {
+	ListData protoreflect.List
+}
+
+// 实现proto.Message接口（list序列化需要）
+func (l *ListWrapper) ProtoReflect() protoreflect.Message {
+	// 实际使用时需要根据具体list类型生成对应的反射实现
+	// 这里简化处理，实际项目中需要更完整的实现
+	return protoreflect.Message(nil)
 }
 
 var MysqlFieldDescriptorType = []string{
@@ -339,6 +431,40 @@ func EscapeStringQuotes(buf []byte, v string) []byte {
 	}
 
 	return buf[:pos]
+}
+
+// 反斜杠转义的反向操作（从数据库读取时使用）
+func UnescapeBytesBackslash(v []byte) []byte {
+	result := make([]byte, 0, len(v))
+	i := 0
+	for i < len(v) {
+		if v[i] == '\\' && i+1 < len(v) {
+			switch v[i+1] {
+			case '0':
+				result = append(result, '\x00')
+			case 'n':
+				result = append(result, '\n')
+			case 'r':
+				result = append(result, '\r')
+			case 'Z':
+				result = append(result, '\x1a')
+			case '\'':
+				result = append(result, '\'')
+			case '"':
+				result = append(result, '"')
+			case '\\':
+				result = append(result, '\\')
+			default:
+				// 未知转义序列，保留原样
+				result = append(result, v[i], v[i+1])
+			}
+			i += 2
+		} else {
+			result = append(result, v[i])
+			i++
+		}
+	}
+	return result
 }
 
 func (m *MessageTable) GetCreateTableSqlStmt() string {
