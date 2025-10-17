@@ -19,5 +19,6 @@ func NewMysqlConfig(jsonConfig JsonConfig) *mysql.Config {
 	myCnf.Addr = jsonConfig.Addr
 	myCnf.Net = jsonConfig.Net
 	myCnf.DBName = jsonConfig.DBName
+	myCnf.InterpolateParams = true
 	return myCnf
 }

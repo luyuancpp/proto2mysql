@@ -16,6 +16,12 @@ const (
 	kPrimaryKeyIndex = 0
 )
 
+// SqlWithArgs 存储带?占位符的SQL和对应的参数列表
+type SqlWithArgs struct {
+	Sql  string        // 带占位符的SQL（如 "REPLACE INTO t (a,b) VALUES (?,?)"）
+	Args []interface{} // 与占位符一一对应的参数值
+}
+
 type MessageTable struct {
 	tableName                      string
 	defaultInstance                proto.Message
@@ -698,21 +704,25 @@ func (m *MessageTable) GetDeleteSqlWithWhereClause(whereClause string) string {
 	return stmt
 }
 
-func (m *MessageTable) GetReplaceIntoSql(message proto.Message) string {
-	sql := m.replaceSQL
-	needComma := false
+func (m *MessageTable) GetReplaceIntoSql(message proto.Message) *SqlWithArgs {
+	// 1. 收集参数列表（复用原有的SerializeFieldAsString，但无需手动加单引号）
+	var args []interface{}
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		if needComma {
-			sql += ", "
-		} else {
-			needComma = true
-		}
 		fieldDesc := m.Descriptor.Fields().Get(i)
+		// 注意：此处不再拼接字符串，而是直接将序列化后的值存入args
 		value := SerializeFieldAsString(message, fieldDesc)
-		sql += "'" + value + "'"
+		args = append(args, value)
 	}
-	sql += ")"
-	return sql
+
+	// 2. 生成带?占位符的SQL（替换原有的字符串拼接）
+	placeholders := strings.Repeat("?, ", len(args))
+	placeholders = strings.TrimSuffix(placeholders, ", ")       // 去掉最后一个多余的逗号
+	sqlStmt := fmt.Sprintf("%s%s)", m.replaceSQL, placeholders) // m.replaceSQL 是原有的 "REPLACE INTO t (a,b) VALUES ("
+
+	return &SqlWithArgs{
+		Sql:  sqlStmt,
+		Args: args,
+	}
 }
 
 func (m *MessageTable) GetUpdateSetStmt(message proto.Message) string {
@@ -935,11 +945,21 @@ func (p *PbMysqlDB) AlterModifyTableField(message proto.Message) error {
 func (p *PbMysqlDB) Save(message proto.Message) error {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
-		return fmt.Errorf("table not found")
+		return fmt.Errorf("table not found: %s", GetTableName(message))
 	}
-	_, err := p.DB.Exec(table.GetReplaceIntoSql(message))
+
+	// 1. 获取带占位符的SQL和参数列表
+	sqlWithArgs := table.GetReplaceIntoSql(message)
+	if sqlWithArgs == nil {
+		return fmt.Errorf("failed to generate replace SQL")
+	}
+
+	// 2. 执行参数化查询（驱动自动处理转义）
+	_, err := p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
-		return err
+		// 打印错误时附带SQL和参数，方便调试（生产环境需脱敏）
+		return fmt.Errorf("exec replace SQL failed: sql=%s, args=%v, err=%v",
+			sqlWithArgs.Sql, sqlWithArgs.Args, err)
 	}
 
 	return nil
