@@ -195,12 +195,12 @@ func TestFindInsert(t *testing.T) {
 		return
 	}
 
-	err = pbMySqlDB.Insert(pbSave)
+	err = pbMySqlDB.InsertOnDupUpdate(pbSave)
 	if err != nil {
 		log.Fatal(err)
 		return
 	}
-	err = pbMySqlDB.Insert(pbSave1)
+	err = pbMySqlDB.InsertOnDupUpdate(pbSave1)
 	if err != nil {
 		log.Fatal(err)
 		return
