@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	_ "github.com/go-sql-driver/mysql"
-	"github.com/luyuancpp/dbprotooption"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"log"
@@ -293,83 +292,82 @@ var MySQLFieldTypes = map[protoreflect.Kind]string{
 	protoreflect.Int32Kind:   "int NOT NULL",
 	protoreflect.Uint32Kind:  "int unsigned NOT NULL",
 	protoreflect.FloatKind:   "float NOT NULL DEFAULT '0'",
-	protoreflect.StringKind:  "varchar(256)",
+	protoreflect.StringKind:  "TEXT",
 	protoreflect.Int64Kind:   "bigint NOT NULL",
 	protoreflect.Uint64Kind:  "bigint unsigned NOT NULL",
 	protoreflect.DoubleKind:  "double NOT NULL DEFAULT '0'",
 	protoreflect.BoolKind:    "bool",
 	protoreflect.EnumKind:    "int NOT NULL",
-	protoreflect.BytesKind:   "Blob",
-	protoreflect.MessageKind: "Blob",
+	protoreflect.BytesKind:   "MEDIUMBLOB",
+	protoreflect.MessageKind: "MEDIUMBLOB",
 }
 
 // GetCreateTableSQL 生成创建表的SQL语句
+// GetCreateTableSQL 生成创建表的SQL语句（完整实现）
 func (m *MessageTable) GetCreateTableSQL() string {
 	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", m.tableName)
+	fields := []string{}
+	indexes := []string{}
 
-	// 解析表选项
-	if m.options.Has(dbprotooption.E_OptionPrimaryKey.TypeDescriptor()) {
-		v := m.options.Get(dbprotooption.E_OptionPrimaryKey.TypeDescriptor())
-		m.primaryKey = strings.Split(v.String(), ",")
-	}
-	if m.options.Has(dbprotooption.E_OptionIndex.TypeDescriptor()) {
-		v := m.options.Get(dbprotooption.E_OptionIndex.TypeDescriptor())
-		m.indexes = strings.Split(v.String(), ",")
-	}
-	if m.options.Has(dbprotooption.E_OptionUniqueKey.TypeDescriptor()) {
-		m.uniqueKeys = m.options.Get(dbprotooption.E_OptionUniqueKey.TypeDescriptor()).String()
-	}
-	m.autoIncreaseKey = m.options.Get(dbprotooption.E_OptionAutoIncrementKey.TypeDescriptor()).String()
-
-	// 生成字段定义（修复：字段类型索引越界）
-	needComma := false
-	fieldIndent := "\t"
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		field := m.Descriptor.Fields().Get(i)
+	// 1. 解析字段定义
+	desc := m.Descriptor
+	for i := 0; i < desc.Fields().Len(); i++ {
+		field := desc.Fields().Get(i)
 		fieldName := string(field.Name())
+
+		// 获取MySQL字段类型
 		fieldType, ok := MySQLFieldTypes[field.Kind()]
 		if !ok {
-			log.Printf("warning: unknown field kind %v for field %s, using default type", field.Kind(), fieldName)
 			fieldType = "varchar(256)" // 默认类型
 		}
 
-		if needComma {
-			stmt += ",\n"
-		} else {
-			needComma = true
+		// 处理自增字段
+		if m.autoIncreaseKey == fieldName {
+			fieldType += " AUTO_INCREMENT"
 		}
 
-		stmt += fieldIndent + fieldName + " " + fieldType
-		if fieldName == m.autoIncreaseKey {
-			stmt += " AUTO_INCREMENT"
-		}
+		fields = append(fields, fmt.Sprintf("  `%s` %s", fieldName, fieldType))
 	}
 
-	// 生成主键约束
+	// 2. 处理主键
 	if len(m.primaryKey) > 0 {
-		stmt += ",\n" + fieldIndent + fmt.Sprintf("PRIMARY KEY (%s)", m.primaryKey[PrimaryKeyIndex])
-	}
-
-	// 生成唯一键约束
-	if len(m.uniqueKeys) > 0 {
-		stmt += ",\n" + fieldIndent + fmt.Sprintf("UNIQUE KEY (%s)", m.uniqueKeys)
-	}
-
-	// 生成普通索引
-	for _, index := range m.indexes {
-		if index == "" {
-			continue
+		primaryKeys := make([]string, len(m.primaryKey))
+		for i, pk := range m.primaryKey {
+			primaryKeys[i] = fmt.Sprintf("`%s`", pk)
 		}
-		stmt += ",\n" + fieldIndent + fmt.Sprintf("INDEX (%s)", index)
+		fields = append(fields, fmt.Sprintf("  PRIMARY KEY (%s)", strings.Join(primaryKeys, ",")))
 	}
 
-	// 表选项
-	stmt += "\n) ENGINE = INNODB"
-	if m.autoIncreaseKey != "" {
-		stmt += " AUTO_INCREMENT=1"
+	// 3. 处理普通索引
+	if len(m.indexes) > 0 {
+		for idx, indexCols := range m.indexes {
+			cols := strings.Split(indexCols, ",")
+			quotedCols := make([]string, len(cols))
+			for i, col := range cols {
+				quotedCols[i] = fmt.Sprintf("`%s`", col)
+			}
+			indexes = append(indexes, fmt.Sprintf("  INDEX idx_%d (%s)", idx, strings.Join(quotedCols, ",")))
+		}
 	}
-	stmt += " DEFAULT CHARSET = utf8mb4;"
 
+	// 4. 处理唯一索引
+	if m.uniqueKeys != "" {
+		uniqueCols := strings.Split(m.uniqueKeys, ",")
+		quotedUniqueCols := make([]string, len(uniqueCols))
+		for i, col := range uniqueCols {
+			quotedUniqueCols[i] = fmt.Sprintf("`%s`", col)
+		}
+		indexes = append(indexes, fmt.Sprintf("  UNIQUE KEY uk (%s)", strings.Join(quotedUniqueCols, ",")))
+	}
+
+	// 5. 组合语句
+	stmt += strings.Join(fields, ",\n")
+	if len(indexes) > 0 {
+		stmt += ",\n" + strings.Join(indexes, ",\n")
+	}
+
+	// 6. 表选项（字符集和引擎）
+	stmt += "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;"
 	return stmt
 }
 

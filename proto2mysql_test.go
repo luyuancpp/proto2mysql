@@ -11,6 +11,7 @@ import (
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -972,5 +973,167 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 		t.Logf("批量清理测试数据失败: %v", err)
 	} else {
 		t.Log("\n=== 全量特殊字符测试完成，所有测试数据已清理 ===")
+	}
+}
+
+// TestNullValueHandling 测试空值和默认值处理
+func TestNullValueHandling(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	// 构造包含空值的测试数据
+	pbSave := &dbprotooption.GolangTest{
+		Id:      3,
+		GroupId: 0,  // 零值
+		Ip:      "", // 空字符串
+		Port:    0,
+		Player:  nil, // 空嵌套消息
+	}
+	pbMySqlDB.RegisterTable(pbSave)
+
+	mysqlConfig := GetMysqlConfig()
+	if mysqlConfig == nil {
+		t.Fatal("获取配置失败")
+	}
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		t.Fatalf("创建连接器失败: %v", err)
+	}
+	db := sql.OpenDB(conn)
+	defer db.Close()
+
+	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
+		t.Fatal(err)
+	}
+
+	// 清理旧数据
+	db.Exec("DELETE FROM " + GetTableName(pbSave) + " WHERE id=3")
+
+	// 保存空值数据
+	if err := pbMySqlDB.Save(pbSave); err != nil {
+		t.Fatalf("保存空值数据失败: %v", err)
+	}
+
+	// 验证读取结果
+	pbLoad := &dbprotooption.GolangTest{}
+	if err := pbMySqlDB.FindOneByKV(pbLoad, "id", "3"); err != nil {
+		t.Fatalf("读取空值数据失败: %v", err)
+	}
+
+	// 检查空值是否正确映射
+	if pbLoad.Ip != "" {
+		t.Errorf("空字符串处理错误: 预期空值，实际为 %s", pbLoad.Ip)
+	}
+	if pbLoad.Player != nil {
+		t.Error("空嵌套消息处理错误: 预期nil，实际不为nil")
+	}
+	if pbLoad.GroupId != 0 {
+		t.Errorf("零值处理错误: 预期0，实际为 %d", pbLoad.GroupId)
+	}
+}
+
+// TestLargeFieldStorage 测试大字段存储（超过256字符的字符串）
+func TestLargeFieldStorage(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	// 生成10KB的大字符串
+	largeStr := strings.Repeat("a", 1024*10)
+	pbSave := &dbprotooption.GolangTest{
+		Id:      4,
+		GroupId: 2,
+		Ip:      largeStr, // 大字段
+		Port:    8080,
+		Player: &dbprotooption.Player{
+			PlayerId: 222,
+			Name:     largeStr, // 嵌套消息中的大字段
+		},
+	}
+	pbMySqlDB.RegisterTable(pbSave)
+
+	mysqlConfig := GetMysqlConfig()
+	if mysqlConfig == nil {
+		t.Fatal("获取配置失败")
+	}
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		t.Fatalf("创建连接器失败: %v", err)
+	}
+	db := sql.OpenDB(conn)
+	defer db.Close()
+
+	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
+		t.Fatal(err)
+	}
+
+	// 清理旧数据
+	db.Exec("DELETE FROM " + GetTableName(pbSave) + " WHERE id=4")
+
+	// 保存大字段数据
+	if err := pbMySqlDB.Save(pbSave); err != nil {
+		t.Fatalf("保存大字段失败: %v", err)
+	}
+
+	// 验证读取结果
+	pbLoad := &dbprotooption.GolangTest{}
+	if err := pbMySqlDB.FindOneByKV(pbLoad, "id", "4"); err != nil {
+		t.Fatalf("读取大字段失败: %v", err)
+	}
+
+	// 检查大字段完整性
+	if len(pbLoad.Ip) != len(largeStr) {
+		t.Errorf("大字符串长度不匹配: 预期 %d，实际 %d", len(largeStr), len(pbLoad.Ip))
+	}
+	if pbLoad.Player.Name != largeStr {
+		t.Error("嵌套消息大字段存储失败")
+	}
+}
+
+// TestBatchOperations 测试批量插入和查询
+func TestBatchOperations(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	testTable := &dbprotooption.GolangTest{}
+	pbMySqlDB.RegisterTable(testTable)
+
+	mysqlConfig := GetMysqlConfig()
+	if mysqlConfig == nil {
+		t.Fatal("获取配置失败")
+	}
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		t.Fatalf("创建连接器失败: %v", err)
+	}
+	db := sql.OpenDB(conn)
+	defer db.Close()
+
+	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
+		t.Fatal(err)
+	}
+
+	// 清理旧数据
+	db.Exec("DELETE FROM " + GetTableName(testTable) + " WHERE group_id=3")
+
+	// 批量插入10条数据
+	batchSize := 10
+	for i := 0; i < batchSize; i++ {
+		pb := &dbprotooption.GolangTest{
+			Id:      uint32(100 + i),
+			GroupId: 3,
+			Ip:      fmt.Sprintf("192.168.1.%d", i),
+			Port:    3306 + uint32(i),
+		}
+		if err := pbMySqlDB.Save(pb); err != nil {
+			t.Fatalf("批量插入失败（第%d条）: %v", i, err)
+		}
+	}
+
+	// 批量查询
+	list := &dbprotooption.GolangTestList{} // 假设存在包含repeated GolangTest的消息
+	if err := pbMySqlDB.FindAllByWhereWithArgs(
+		list,
+		"group_id = ?",
+		[]interface{}{3},
+	); err != nil {
+		t.Fatalf("批量查询失败: %v", err)
+	}
+
+	if len(list.TestList) != batchSize {
+		t.Errorf("批量查询结果数量不匹配: 预期 %d，实际 %d", batchSize, len(list.TestList))
 	}
 }
