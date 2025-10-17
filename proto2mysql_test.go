@@ -1,4 +1,21 @@
-package protobuf_to_mysql
+package proto2mysql
+
+import (
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"github.com/go-sql-driver/mysql"
+	"github.com/luyuancpp/dbprotooption"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"log"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"testing"
+)
+
+-go
 
 import (
 	"database/sql"
