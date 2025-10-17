@@ -82,7 +82,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		if err != nil {
 			return "<map_marshal_error>"
 		}
-		return string(EscapeBytesBackslash(nil, data))
+		return string(data)
 	}
 
 	// 处理list类型
@@ -98,7 +98,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		if err != nil {
 			return "<list_marshal_error>"
 		}
-		return string(EscapeBytesBackslash(nil, data))
+		return string(data)
 	}
 
 	// 原有非集合类型处理逻辑
@@ -123,14 +123,14 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		val := reflection.Get(fieldDesc).Enum()
 		return fmt.Sprintf("%d", int32(val))
 	case protoreflect.BytesKind:
-		b := reflection.Get(fieldDesc).Bytes()
-		return string(EscapeBytesBackslash(nil, b))
+		data := reflection.Get(fieldDesc).Bytes()
+		return string(data)
 	case protoreflect.MessageKind:
 		if reflection.Has(fieldDesc) {
 			subMessage := reflection.Get(fieldDesc).Message()
 			data, err := proto.Marshal(subMessage.Interface())
 			if err == nil {
-				return string(EscapeBytesBackslash(nil, data))
+				return string(data)
 			} else {
 				return "<marshal_error>"
 			}
@@ -160,7 +160,7 @@ func ParseFromString(message proto.Message, row []string) error {
 		if fieldDesc.IsMap() {
 			// 反序列化二进制到临时包装器
 			mapWrapper := &MapWrapper{}
-			data := UnescapeBytesBackslash([]byte(fieldValue))
+			data := []byte(fieldValue)
 			if err := proto.Unmarshal(data, mapWrapper); err != nil {
 				return fmt.Errorf("parse map (field: %s): %w", fieldDesc.Name(), err)
 			}
@@ -177,7 +177,7 @@ func ParseFromString(message proto.Message, row []string) error {
 		if fieldDesc.IsList() {
 			// 反序列化二进制到临时包装器
 			listWrapper := &ListWrapper{}
-			data := UnescapeBytesBackslash([]byte(fieldValue))
+			data := []byte(fieldValue)
 			if err := proto.Unmarshal(data, listWrapper); err != nil {
 				return fmt.Errorf("parse list (field: %s): %w", fieldDesc.Name(), err)
 			}
@@ -246,10 +246,10 @@ func ParseFromString(message proto.Message, row []string) error {
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfEnum(protoreflect.EnumNumber(val)))
 		case protoreflect.BytesKind:
-			reflection.Set(fieldDesc, protoreflect.ValueOfBytes(UnescapeBytesBackslash([]byte(row[i]))))
+			reflection.Set(fieldDesc, protoreflect.ValueOfBytes([]byte(row[i])))
 		case protoreflect.MessageKind:
 			subMsg := reflection.Mutable(fieldDesc).Message()
-			err := proto.Unmarshal(UnescapeBytesBackslash([]byte(row[i])), subMsg.Interface())
+			err := proto.Unmarshal([]byte(row[i]), subMsg.Interface())
 			if err != nil {
 				return fmt.Errorf("unmarshal sub-message failed: %w", err)
 			}
@@ -313,164 +313,6 @@ func reserveBuffer(buf []byte, appendSize int) []byte {
 		buf = newBuf
 	}
 	return buf[:newSize]
-}
-
-func EscapeBytesBackslash(buf, v []byte) []byte {
-	pos := len(buf)
-	buf = reserveBuffer(buf, len(v)*2)
-
-	for _, c := range v {
-		switch c {
-		case '\x00':
-			buf[pos+1] = '0'
-			buf[pos] = '\\'
-			pos += 2
-		case '\n':
-			buf[pos+1] = 'n'
-			buf[pos] = '\\'
-			pos += 2
-		case '\r':
-			buf[pos+1] = 'r'
-			buf[pos] = '\\'
-			pos += 2
-		case '\x1a':
-			buf[pos+1] = 'Z'
-			buf[pos] = '\\'
-			pos += 2
-		case '\'':
-			buf[pos+1] = '\''
-			buf[pos] = '\\'
-			pos += 2
-		case '"':
-			buf[pos+1] = '"'
-			buf[pos] = '\\'
-			pos += 2
-		case '\\':
-			buf[pos+1] = '\\'
-			buf[pos] = '\\'
-			pos += 2
-		default:
-			buf[pos] = c
-			pos++
-		}
-	}
-
-	return buf[:pos]
-}
-
-func EscapeStringBackslash(buf []byte, v string) []byte {
-	pos := len(buf)
-	buf = reserveBuffer(buf, len(v)*2)
-
-	for i := 0; i < len(v); i++ {
-		c := v[i]
-		switch c {
-		case '\x00':
-			buf[pos+1] = '0'
-			buf[pos] = '\\'
-			pos += 2
-		case '\n':
-			buf[pos+1] = 'n'
-			buf[pos] = '\\'
-			pos += 2
-		case '\r':
-			buf[pos+1] = 'r'
-			buf[pos] = '\\'
-			pos += 2
-		case '\x1a':
-			buf[pos+1] = 'Z'
-			buf[pos] = '\\'
-			pos += 2
-		case '\'':
-			buf[pos+1] = '\''
-			buf[pos] = '\\'
-			pos += 2
-		case '"':
-			buf[pos+1] = '"'
-			buf[pos] = '\\'
-			pos += 2
-		case '\\':
-			buf[pos+1] = '\\'
-			buf[pos] = '\\'
-			pos += 2
-		default:
-			buf[pos] = c
-			pos++
-		}
-	}
-
-	return buf[:pos]
-}
-
-func EscapeBytesQuotes(buf, v []byte) []byte {
-	pos := len(buf)
-	buf = reserveBuffer(buf, len(v)*2)
-
-	for _, c := range v {
-		if c == '\'' {
-			buf[pos+1] = '\''
-			buf[pos] = '\''
-			pos += 2
-		} else {
-			buf[pos] = c
-			pos++
-		}
-	}
-
-	return buf[:pos]
-}
-
-func EscapeStringQuotes(buf []byte, v string) []byte {
-	pos := len(buf)
-	buf = reserveBuffer(buf, len(v)*2)
-
-	for i := 0; i < len(v); i++ {
-		c := v[i]
-		if c == '\'' {
-			buf[pos+1] = '\''
-			buf[pos] = '\''
-			pos += 2
-		} else {
-			buf[pos] = c
-			pos++
-		}
-	}
-
-	return buf[:pos]
-}
-
-// 反斜杠转义的反向操作（从数据库读取时使用）
-func UnescapeBytesBackslash(v []byte) []byte {
-	result := make([]byte, 0, len(v))
-	i := 0
-	for i < len(v) {
-		if v[i] == '\\' && i+1 < len(v) {
-			switch v[i+1] {
-			case '0':
-				result = append(result, '\x00')
-			case 'n':
-				result = append(result, '\n')
-			case 'r':
-				result = append(result, '\r')
-			case 'Z':
-				result = append(result, '\x1a')
-			case '\'':
-				result = append(result, '\'')
-			case '"':
-				result = append(result, '"')
-			case '\\':
-				result = append(result, '\\')
-			default:
-				// 未知转义序列，保留原样
-				result = append(result, v[i], v[i+1])
-			}
-			i += 2
-		} else {
-			result = append(result, v[i])
-			i++
-		}
-	}
-	return result
 }
 
 func (m *MessageTable) GetCreateTableSqlStmt() string {
