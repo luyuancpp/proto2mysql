@@ -56,7 +56,7 @@ func TestCreateTable(t *testing.T) {
 		log.Fatal(err)
 	}
 
-	result, err := db.Exec(pbMySqlDB.GetCreateTableSql(&dbprotooption.GolangTest{}))
+	result, err := db.Exec(pbMySqlDB.GetCreateTableSQL(&dbprotooption.GolangTest{}))
 	if err != nil {
 		fmt.Println(err)
 		return
@@ -254,7 +254,7 @@ func TestLoadByWhereCase(t *testing.T) {
 	}
 
 	pbLoad := &dbprotooption.GolangTest{}
-	err = pbMySqlDB.FindOneByWhereCase(pbLoad, "where id=1")
+	err = pbMySqlDB.FindOneByWhereClause(pbLoad, "where id=1")
 	if err != nil {
 		log.Fatal(err)
 		return
@@ -461,7 +461,7 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 	}
 
 	pbLoadList := &dbprotooption.GolangTestList{}
-	err = pbMySqlDB.FindAllByWhereCase(pbLoadList, "where group_id=1")
+	err = pbMySqlDB.FindAllByWhereClause(pbLoadList, "where group_id=1")
 	if err != nil {
 		log.Fatal(err)
 		return
