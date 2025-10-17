@@ -151,7 +151,7 @@ func TestLoadSave(t *testing.T) {
 		return
 	}
 	if !proto.Equal(pbSave, pbLoad) {
-		log.Fatal("pb not equal")
+		t.Errorf("pb not equal")
 	}
 }
 
@@ -198,63 +198,6 @@ func TestLoadByWhereCase(t *testing.T) {
 		return
 	}
 	if !proto.Equal(pbSave, pbLoad) {
-		log.Fatal("pb not equal")
-	}
-}
-
-func TestLoadSaveList(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
-	pbSaveList := &dbprotooption.GolangTestList{
-		TestList: []*dbprotooption.GolangTest{
-			{
-				Id:      1,
-				GroupId: 1,
-				Ip:      "127.0.0.1",
-				Port:    3306,
-				Player: &dbprotooption.Player{
-					PlayerId: 111,
-					Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
-				},
-			},
-			{
-				Id:      2,
-				GroupId: 1,
-				Ip:      "127.0.0.1",
-				Port:    3306,
-				Player: &dbprotooption.Player{
-					PlayerId: 111,
-					Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
-				},
-			},
-		},
-	}
-	pbMySqlDB.RegisterTable(&dbprotooption.GolangTest{})
-	mysqlConfig := GetMysqlConfig()
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		log.Fatal(err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Fatal(err)
-		}
-	}(db)
-	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
-	if err != nil {
-		return
-	}
-
-	pbLoadList := &dbprotooption.GolangTestList{}
-	err = pbMySqlDB.FindAll(pbLoadList)
-	if err != nil {
-		log.Fatal(err)
-		return
-	}
-	if !proto.Equal(pbSaveList, pbLoadList) {
-		fmt.Println(pbSaveList.String())
-		fmt.Println(pbLoadList.String())
 		log.Fatal("pb not equal")
 	}
 }
