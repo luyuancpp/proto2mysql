@@ -631,7 +631,33 @@ func (p *PbMysqlDB) clearColumnCache(tableName string) {
 	}
 }
 
+// CreateOrUpdateTable 尝试创建表，失败则自动更新表结构
+func (p *PbMysqlDB) CreateOrUpdateTable(m proto.Message) error {
+	tableName := GetTableName(m)
+	table, ok := p.Tables[tableName]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+	}
+
+	// 先尝试创建表
+	createSQL := table.GetCreateTableSQL()
+	_, err := p.DB.Exec(createSQL)
+	if err == nil {
+		// 创建成功，更新缓存
+		p.updateTableExistsCache(tableName, true)
+		return nil
+	}
+
+	// 创建失败，判断是否需要更新表结构
+	// 常见失败原因：表已存在、字段冲突等
+	log.Printf("创建表 %s 失败: %v，尝试更新表结构...", tableName, err)
+
+	// 强制更新表结构（无论表是否存在）
+	return p.UpdateTableField(m)
+}
+
 // UpdateTableField 同步表字段
+// UpdateTableField 同步表字段（增强版：无论表是否存在都尝试处理）
 func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 	tableName := GetTableName(m)
 	table, ok := p.Tables[tableName]
@@ -641,20 +667,23 @@ func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 
 	exists, err := p.IsTableExists(tableName)
 	if err != nil {
-		return fmt.Errorf("check table %s exists: %w", tableName, err)
+		return fmt.Errorf("检查表 %s 存在性: %w", tableName, err)
 	}
+
+	// 如果表不存在，直接创建
 	if !exists {
 		createSQL := table.GetCreateTableSQL()
 		if _, err := p.DB.Exec(createSQL); err != nil {
-			return fmt.Errorf("create table %s: %w, SQL: %s", tableName, err, createSQL)
+			return fmt.Errorf("创建表 %s 失败: %w, SQL: %s", tableName, err, createSQL)
 		}
 		p.updateTableExistsCache(tableName, true)
 		return nil
 	}
 
+	// 表已存在，同步字段结构
 	currentCols, err := p.getTableColumns(tableName)
 	if err != nil {
-		return fmt.Errorf("get table %s columns: %w", tableName, err)
+		return fmt.Errorf("获取表 %s 字段: %w", tableName, err)
 	}
 
 	var alterSQLs []string
@@ -671,22 +700,25 @@ func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 		targetType := table.getMySQLFieldType(fieldDesc)
 
 		if currentType, exists := currentCols[fieldName]; exists {
+			// 字段存在但类型不兼容，修改字段类型
 			if !isTypeMatch(currentType, targetType) {
 				alterSQLs = append(alterSQLs, fmt.Sprintf("MODIFY COLUMN %s %s", escapeMySQLName(fieldName), targetType))
 			}
-			delete(currentCols, fieldName)
+			delete(currentCols, fieldName) // 标记为已处理
 		} else {
+			// 字段不存在，新增字段
 			alterSQLs = append(alterSQLs, fmt.Sprintf("ADD COLUMN %s %s", escapeMySQLName(fieldName), targetType))
 		}
 	}
 
+	// 执行ALTER TABLE（如果有需要修改的内容）
 	if len(alterSQLs) > 0 {
 		alterSQL := fmt.Sprintf("ALTER TABLE %s %s", escapeMySQLName(tableName), strings.Join(alterSQLs, ", "))
 		_, err := p.DB.Exec(alterSQL)
 		if err != nil {
-			return fmt.Errorf("exec ALTER for table %s: %w, SQL: %s", tableName, err, alterSQL)
+			return fmt.Errorf("更新表 %s 结构失败: %w, SQL: %s", tableName, err, alterSQL)
 		}
-		p.clearColumnCache(tableName)
+		p.clearColumnCache(tableName) // 清除缓存，下次查询时重新加载字段
 	}
 
 	return nil
