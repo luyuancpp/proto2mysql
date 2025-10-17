@@ -572,38 +572,137 @@ func (m *MessageTable) GetAlterTableAddFieldSqlStmt() string {
 	return stmt
 }
 
-func (m *MessageTable) GetInsertSqlStmt(message proto.Message) string {
-	stmt := m.insertSQL + "("
-	needComma := false
+// GetInsertSqlWithArgs 生成参数化的INSERT SQL（返回SqlWithArgs，避免字符串拼接）
+func (m *MessageTable) GetInsertSqlWithArgs(message proto.Message) *SqlWithArgs {
+	// 1. 收集参数列表（复用SerializeFieldAsString，无需手动加单引号）
+	var args []interface{}
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		if needComma {
-			stmt += ", "
-		} else {
-			needComma = true
-		}
 		fieldDesc := m.Descriptor.Fields().Get(i)
 		value := SerializeFieldAsString(message, fieldDesc)
-		stmt += "'" + value + "'"
+		args = append(args, value)
 	}
-	stmt += ")"
-	return stmt
+
+	// 2. 生成带?占位符的INSERT SQL（m.insertSQL 是 "INSERT INTO t (a,b) VALUES "）
+	placeholders := strings.Repeat("?, ", len(args))
+	placeholders = strings.TrimSuffix(placeholders, ", ")
+	sqlStmt := fmt.Sprintf("%s(%s)", m.insertSQL, placeholders)
+
+	return &SqlWithArgs{
+		Sql:  sqlStmt,
+		Args: args,
+	}
 }
 
-func (m *MessageTable) GetInsertOnDupUpdateSqlStmt(message proto.Message, db *sql.DB) string {
-	stmt := m.GetInsertSqlStmt(message)
-	stmt += " ON DUPLICATE KEY UPDATE "
-	stmt += m.GetUpdateSetStmt(message)
-	return stmt
+// GetInsertOnDupUpdateSqlWithArgs 生成参数化的INSERT ... ON DUPLICATE KEY UPDATE SQL
+func (m *MessageTable) GetInsertOnDupUpdateSqlWithArgs(message proto.Message) *SqlWithArgs {
+	// 1. 获取基础的INSERT参数化SQL和参数
+	insertSqlWithArgs := m.GetInsertSqlWithArgs(message)
+	if insertSqlWithArgs == nil {
+		return nil
+	}
+
+	// 2. 生成Update部分的占位符和参数（避免字符串拼接）
+	var updateClauses []string
+	var updateArgs []interface{}
+	reflection := message.ProtoReflect()
+
+	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
+		fieldDesc := m.Descriptor.Fields().Get(i)
+		if !reflection.Has(fieldDesc) {
+			continue
+		}
+		// 生成 "field = ?" 格式的Update子句
+		updateClauses = append(updateClauses, fmt.Sprintf("%s = ?", string(fieldDesc.Name())))
+		// 收集Update部分的参数（与Insert参数分开，避免顺序混乱）
+		updateArgs = append(updateArgs, SerializeFieldAsString(message, fieldDesc))
+	}
+
+	// 3. 拼接完整SQL（INSERT + ON DUPLICATE KEY UPDATE）
+	updateClauseStr := strings.Join(updateClauses, ", ")
+	fullSql := fmt.Sprintf("%s ON DUPLICATE KEY UPDATE %s", insertSqlWithArgs.Sql, updateClauseStr)
+
+	// 4. 合并参数（Insert参数在前，Update参数在后，与占位符顺序一致）
+	fullArgs := append(insertSqlWithArgs.Args, updateArgs...)
+
+	return &SqlWithArgs{
+		Sql:  fullSql,
+		Args: fullArgs,
+	}
 }
 
-func (m *MessageTable) GetInsertOnDupKeyForPrimaryKeyStmt(message proto.Message, db *sql.DB) string {
-	stmt := m.GetInsertSqlStmt(message)
-	stmt += " ON DUPLICATE KEY UPDATE "
-	stmt += " " + string(m.primaryKeyField.Name())
-	value := SerializeFieldAsString(message, m.primaryKeyField)
-	stmt += "="
-	stmt += "'" + value + "';"
-	return stmt
+// GetInsertOnDupKeyForPrimaryKeyWithArgs 生成参数化的INSERT ... ON DUPLICATE KEY UPDATE（仅更新主键）
+func (m *MessageTable) GetInsertOnDupKeyForPrimaryKeyWithArgs(message proto.Message) *SqlWithArgs {
+	if m.primaryKeyField == nil {
+		return nil
+	}
+
+	// 1. 获取基础的INSERT参数化SQL和参数
+	insertSqlWithArgs := m.GetInsertSqlWithArgs(message)
+	if insertSqlWithArgs == nil {
+		return nil
+	}
+
+	// 2. 生成主键Update的占位符和参数
+	primaryKeyName := string(m.primaryKeyField.Name())
+	primaryKeyValue := SerializeFieldAsString(message, m.primaryKeyField)
+	updateClause := fmt.Sprintf("%s = ?", primaryKeyName)
+
+	// 3. 拼接完整SQL
+	fullSql := fmt.Sprintf("%s ON DUPLICATE KEY UPDATE %s", insertSqlWithArgs.Sql, updateClause)
+
+	// 4. 合并参数（Insert参数 + 主键参数）
+	fullArgs := append(insertSqlWithArgs.Args, primaryKeyValue)
+
+	return &SqlWithArgs{
+		Sql:  fullSql,
+		Args: fullArgs,
+	}
+}
+
+// Insert 执行参数化的INSERT操作（避免SQL注入）
+func (p *PbMysqlDB) Insert(message proto.Message) error {
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		return fmt.Errorf("table not found: %s", GetTableName(message))
+	}
+
+	// 1. 获取参数化的Insert SQL和参数
+	sqlWithArgs := table.GetInsertSqlWithArgs(message)
+	if sqlWithArgs == nil {
+		return fmt.Errorf("failed to generate insert SQL")
+	}
+
+	// 2. 执行参数化查询（驱动自动处理转义）
+	_, err := p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	if err != nil {
+		return fmt.Errorf("exec insert SQL failed: sql=%s, args=%v, err=%v",
+			sqlWithArgs.Sql, sqlWithArgs.Args, err)
+	}
+
+	return nil
+}
+
+// InsertOnDupUpdate 执行参数化的INSERT ... ON DUPLICATE KEY UPDATE操作
+func (p *PbMysqlDB) InsertOnDupUpdate(message proto.Message) error {
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		return fmt.Errorf("table not found: %s", GetTableName(message))
+	}
+
+	// 1. 获取参数化的SQL和参数
+	sqlWithArgs := table.GetInsertOnDupUpdateSqlWithArgs(message)
+	if sqlWithArgs == nil {
+		return fmt.Errorf("failed to generate insert on dup update SQL")
+	}
+
+	// 2. 执行参数化查询
+	_, err := p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	if err != nil {
+		return fmt.Errorf("exec insert on dup update SQL failed: sql=%s, args=%v, err=%v",
+			sqlWithArgs.Sql, sqlWithArgs.Args, err)
+	}
+
+	return nil
 }
 
 func (m *MessageTable) GetSelectSqlByKVWhereStmt(whereType, whereVal string) string {
@@ -628,19 +727,6 @@ func (m *MessageTable) GetAlterTableAddFieldSqlStmt1() string {
 
 	stmt = strings.TrimSuffix(stmt, ", ")
 	stmt += ";"
-	return stmt
-}
-
-// 获取插入数据的 SQL 语句
-func (m *MessageTable) GetInsertSqlStmt1(message proto.Message) string {
-	stmt := "INSERT INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES ("
-	values := []string{}
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		fieldDesc := m.Descriptor.Fields().Get(i)
-		value := SerializeFieldAsString(message, fieldDesc)
-		values = append(values, "'"+value+"'")
-	}
-	stmt += strings.Join(values, ", ") + ")"
 	return stmt
 }
 
