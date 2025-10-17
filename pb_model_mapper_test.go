@@ -155,6 +155,68 @@ func TestLoadSave(t *testing.T) {
 	}
 }
 
+func TestFindInsert(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	pbSave := &dbprotooption.GolangTest{
+		Id:      1,
+		GroupId: 1,
+		Ip:      "127.0.0.1",
+		Port:    3306,
+		Player: &dbprotooption.Player{
+			PlayerId: 111,
+			Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
+		},
+	}
+	pbSave1 := &dbprotooption.GolangTest{
+		Id:      2,
+		GroupId: 1,
+		Ip:      "127.0.0.1",
+		Port:    3306,
+		Player: &dbprotooption.Player{
+			PlayerId: 111,
+			Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
+		},
+	}
+	pbMySqlDB.RegisterTable(pbSave)
+	mysqlConfig := GetMysqlConfig()
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	db := sql.OpenDB(conn)
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
+	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	if err != nil {
+		return
+	}
+
+	err = pbMySqlDB.Insert(pbSave)
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+	err = pbMySqlDB.Insert(pbSave1)
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+
+	pbLoad := &dbprotooption.GolangTest{}
+	err = pbMySqlDB.FindOneByKV(pbLoad, "id", "1")
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+	if !proto.Equal(pbSave, pbLoad) {
+		t.Errorf("pb not equal")
+	}
+}
+
 func TestLoadByWhereCase(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
 	pbSave := &dbprotooption.GolangTest{

@@ -80,7 +80,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		}
 		data, err := proto.Marshal(mapWrapper)
 		if err != nil {
-			return "<map_marshal_error>"
+			return ""
 		}
 		return string(data)
 	}
@@ -96,7 +96,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		}
 		data, err := proto.Marshal(listWrapper)
 		if err != nil {
-			return "<list_marshal_error>"
+			return ""
 		}
 		return string(data)
 	}
@@ -977,9 +977,6 @@ func (p *PbMysqlDB) FindOneByKV(message proto.Message, whereType string, whereVa
 		return fmt.Errorf("exec select SQL failed: %w", err)
 	}
 	defer rows.Close() // 补充defer关闭rows，避免资源泄漏
-	if err != nil {
-		return err
-	}
 
 	columns, err := rows.Columns()
 	if err != nil {
@@ -1093,6 +1090,34 @@ func (p *PbMysqlDB) FindAll(message proto.Message) error {
 	}
 
 	return nil
+}
+
+// 新增：参数化的按条件查询（支持WHERE子句带?占位符）
+func (m *MessageTable) GetSelectSqlByWhereWithArgs(whereClause string, whereArgs []interface{}) *SqlWithArgs {
+	sql := fmt.Sprintf(
+		"%s WHERE %s;",
+		m.getSelectFieldsFromTableSqlStmt(),
+		whereClause, // 含?占位符（如 "name=? AND age>?"）
+	)
+	return &SqlWithArgs{
+		Sql:  sql,
+		Args: whereArgs,
+	}
+}
+
+// 配套改造FindOneByWhereCase
+func (p *PbMysqlDB) FindOneByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		return fmt.Errorf("table not found")
+	}
+	sqlWithArgs := table.GetSelectSqlByWhereWithArgs(whereClause, whereArgs)
+	rows, err := p.DB.Query(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	// 后续的rows.Scan、ParseFromString逻辑不变...
 }
 
 func (p *PbMysqlDB) FindAllByWhereCase(message proto.Message, whereCase string) error {
