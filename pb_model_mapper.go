@@ -730,22 +730,6 @@ func (m *MessageTable) GetAlterTableAddFieldSqlStmt1() string {
 	return stmt
 }
 
-// 获取更新数据的 SQL 语句
-func (m *MessageTable) GetUpdateSqlStmt(message proto.Message) string {
-	stmt := "UPDATE " + m.tableName + " SET "
-	setClause := []string{}
-
-	// 为每个字段生成 SET 子句
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		fieldDesc := m.Descriptor.Fields().Get(i)
-		value := SerializeFieldAsString(message, fieldDesc)
-		setClause = append(setClause, string(fieldDesc.Name())+"='"+value+"'")
-	}
-
-	stmt += strings.Join(setClause, ", ") + " WHERE " + m.primaryKey[0] + " = ?;"
-	return stmt
-}
-
 func (m *MessageTable) GetSelectSqlStmt() string {
 	return m.selectAllSqlStmt
 }
@@ -811,49 +795,105 @@ func (m *MessageTable) GetReplaceIntoSql(message proto.Message) *SqlWithArgs {
 	}
 }
 
-func (m *MessageTable) GetUpdateSetStmt(message proto.Message) string {
-	stmt := ""
+// GetUpdateSetWithArgs 生成参数化的SET子句和对应的参数
+func (m *MessageTable) GetUpdateSetWithArgs(message proto.Message) (setClause string, args []interface{}) {
 	needComma := false
 	reflection := message.ProtoReflect()
+
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		field := m.Descriptor.Fields().Get(i)
-		if reflection.Has(field) {
-			if needComma {
-				stmt += ", "
-			} else {
-				needComma = true
-			}
-			stmt += " " + string(field.Name())
-			value := SerializeFieldAsString(message, field)
-			stmt += "="
-			stmt += "'" + value + "'"
+		if !reflection.Has(field) {
+			continue
 		}
+
+		if needComma {
+			setClause += ", "
+		} else {
+			needComma = true
+		}
+
+		// 生成 "field = ?" 格式的子句，不直接拼接值
+		setClause += fmt.Sprintf(" %s = ?", string(field.Name()))
+		// 收集参数（值）
+		args = append(args, SerializeFieldAsString(message, field))
 	}
-	return stmt
+
+	return setClause, args
 }
 
-func (m *MessageTable) GetUpdateSql(message proto.Message, db *sql.DB) string {
-	stmt := "UPDATE " + m.tableName
-	stmt += " SET "
-	stmt += m.GetUpdateSetStmt(message)
-	stmt += " WHERE "
+// GetUpdateSqlWithArgs 生成参数化的UPDATE语句和对应的参数列表
+func (m *MessageTable) GetUpdateSqlWithArgs(message proto.Message) *SqlWithArgs {
+	// 1. 获取SET子句和对应的参数
+	setClause, setArgs := m.GetUpdateSetWithArgs(message)
+	if setClause == "" {
+		return nil // 没有需要更新的字段
+	}
+
+	// 2. 生成WHERE子句（主键条件）和对应的参数
+	var whereClause string
+	var whereArgs []interface{}
 	needComma := false
+
 	for _, primaryKey := range m.primaryKey {
 		field := m.Descriptor.Fields().ByName(protoreflect.Name(primaryKey))
-		if nil != field {
-			if needComma {
-				stmt += " AND "
-			} else {
-				needComma = true
-			}
-			stmt += primaryKey
-			value := SerializeFieldAsString(message, field)
-			stmt += "='"
-			stmt += value
-			stmt += "'"
+		if field == nil {
+			continue
 		}
+
+		if needComma {
+			whereClause += " AND "
+		} else {
+			needComma = true
+		}
+
+		// 生成 "primaryKey = ?" 格式的条件，不直接拼接值
+		whereClause += fmt.Sprintf("%s = ?", primaryKey)
+		// 收集WHERE条件的参数
+		whereArgs = append(whereArgs, SerializeFieldAsString(message, field))
 	}
-	return stmt
+
+	if whereClause == "" {
+		return nil // 缺少主键条件，避免全表更新
+	}
+
+	// 3. 拼接完整的UPDATE SQL
+	fullSql := fmt.Sprintf(
+		"UPDATE %s SET %s WHERE %s",
+		m.tableName,
+		setClause,
+		whereClause,
+	)
+
+	// 4. 合并所有参数（SET参数在前，WHERE参数在后）
+	fullArgs := append(setArgs, whereArgs...)
+
+	return &SqlWithArgs{
+		Sql:  fullSql,
+		Args: fullArgs,
+	}
+}
+
+// Update 执行参数化的UPDATE操作
+func (p *PbMysqlDB) Update(message proto.Message) error {
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		return fmt.Errorf("table not found: %s", GetTableName(message))
+	}
+
+	// 获取参数化的UPDATE语句和参数
+	sqlWithArgs := table.GetUpdateSqlWithArgs(message)
+	if sqlWithArgs == nil {
+		return fmt.Errorf("failed to generate update SQL (no fields to update or missing primary key)")
+	}
+
+	// 执行参数化查询
+	_, err := p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	if err != nil {
+		return fmt.Errorf("exec update SQL failed: sql=%s, args=%v, err=%v",
+			sqlWithArgs.Sql, sqlWithArgs.Args, err)
+	}
+
+	return nil
 }
 
 func (m *MessageTable) Init() {
