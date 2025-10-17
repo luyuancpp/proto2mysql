@@ -1091,7 +1091,7 @@ func (p *PbMysqlDB) Save(message proto.Message) error {
 	return nil
 }
 
-func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereValue string) error {
+func (p *PbMysqlDB) FindOneByKV(message proto.Message, whereType string, whereValue string) error {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
 		return fmt.Errorf("table not found")
@@ -1129,7 +1129,7 @@ func (p *PbMysqlDB) LoadOneByKV(message proto.Message, whereType string, whereVa
 	return nil
 }
 
-func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) error {
+func (p *PbMysqlDB) FindOneByWhereCase(message proto.Message, whereCase string) error {
 	table, ok := p.Tables[GetTableName(message)]
 	if !ok {
 		return fmt.Errorf("table not found")
@@ -1168,7 +1168,7 @@ func (p *PbMysqlDB) LoadOneByWhereCase(message proto.Message, whereCase string) 
 	return nil
 }
 
-func (p *PbMysqlDB) LoadList(message proto.Message) error {
+func (p *PbMysqlDB) FindAll(message proto.Message) error {
 	reflectionParent := message.ProtoReflect()
 	md := reflectionParent.Descriptor()
 	fds := md.Fields()
@@ -1214,7 +1214,7 @@ func (p *PbMysqlDB) LoadList(message proto.Message) error {
 	return nil
 }
 
-func (p *PbMysqlDB) LoadListByWhereCase(message proto.Message, whereCase string) error {
+func (p *PbMysqlDB) FindAllByWhereCase(message proto.Message, whereCase string) error {
 	reflectionParent := message.ProtoReflect()
 	md := reflectionParent.Descriptor()
 	fds := md.Fields()

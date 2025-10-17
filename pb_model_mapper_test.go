@@ -145,7 +145,7 @@ func TestLoadSave(t *testing.T) {
 	}
 
 	pbLoad := &dbprotooption.GolangTest{}
-	err = pbMySqlDB.LoadOneByKV(pbLoad, "id", "1")
+	err = pbMySqlDB.FindOneByKV(pbLoad, "id", "1")
 	if err != nil {
 		log.Fatal(err)
 		return
@@ -192,7 +192,7 @@ func TestLoadByWhereCase(t *testing.T) {
 	}
 
 	pbLoad := &dbprotooption.GolangTest{}
-	err = pbMySqlDB.LoadOneByWhereCase(pbLoad, "where id=1")
+	err = pbMySqlDB.FindOneByWhereCase(pbLoad, "where id=1")
 	if err != nil {
 		log.Fatal(err)
 		return
@@ -247,64 +247,7 @@ func TestLoadSaveList(t *testing.T) {
 	}
 
 	pbLoadList := &dbprotooption.GolangTestList{}
-	err = pbMySqlDB.LoadList(pbLoadList)
-	if err != nil {
-		log.Fatal(err)
-		return
-	}
-	if !proto.Equal(pbSaveList, pbLoadList) {
-		fmt.Println(pbSaveList.String())
-		fmt.Println(pbLoadList.String())
-		log.Fatal("pb not equal")
-	}
-}
-
-func TestLoadSaveListWhereCase(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
-	pbSaveList := &dbprotooption.GolangTestList{
-		TestList: []*dbprotooption.GolangTest{
-			{
-				Id:      1,
-				GroupId: 1,
-				Ip:      "127.0.0.1",
-				Port:    3306,
-				Player: &dbprotooption.Player{
-					PlayerId: 111,
-					Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
-				},
-			},
-			{
-				Id:      2,
-				GroupId: 1,
-				Ip:      "127.0.0.1",
-				Port:    3306,
-				Player: &dbprotooption.Player{
-					PlayerId: 111,
-					Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
-				},
-			},
-		},
-	}
-	pbMySqlDB.RegisterTable(&dbprotooption.GolangTest{})
-	mysqlConfig := GetMysqlConfig()
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		log.Fatal(err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		err := db.Close()
-		if err != nil {
-			log.Fatal(err)
-		}
-	}(db)
-	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
-	if err != nil {
-		return
-	}
-
-	pbLoadList := &dbprotooption.GolangTestList{}
-	err = pbMySqlDB.LoadListByWhereCase(pbLoadList, "where group_id=1")
+	err = pbMySqlDB.FindAll(pbLoadList)
 	if err != nil {
 		log.Fatal(err)
 		return
@@ -362,7 +305,7 @@ func TestSpecialCharacterEscape(t *testing.T) {
 
 	// 从数据库读取数据
 	pbLoad := &dbprotooption.GolangTest{}
-	err = pbMySqlDB.LoadOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10))
+	err = pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10))
 	if err != nil {
 		t.Fatalf("读取包含特殊字符的数据失败: %v", err)
 	}
@@ -454,7 +397,7 @@ func TestStringWithSpaces(t *testing.T) {
 	// 验证所有测试数据
 	for _, tc := range testCases {
 		pbLoad := &dbprotooption.GolangTest{}
-		err = pbMySqlDB.LoadOneByKV(pbLoad, "id", strconv.FormatUint(uint64(tc.id), 10))
+		err = pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(tc.id), 10))
 		if err != nil {
 			t.Errorf("读取ID为%d的空格测试数据失败: %v", tc.id, err)
 			continue
@@ -465,5 +408,62 @@ func TestStringWithSpaces(t *testing.T) {
 			t.Logf("预期: '%s' (长度: %d)", tc.expected, len(tc.expected))
 			t.Logf("实际: '%s' (长度: %d)", pbLoad.Player.Name, len(pbLoad.Player.Name))
 		}
+	}
+}
+
+func TestLoadSaveListWhereCase(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	pbSaveList := &dbprotooption.GolangTestList{
+		TestList: []*dbprotooption.GolangTest{
+			{
+				Id:      1,
+				GroupId: 1,
+				Ip:      "127.0.0.1",
+				Port:    3306,
+				Player: &dbprotooption.Player{
+					PlayerId: 111,
+					Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
+				},
+			},
+			{
+				Id:      2,
+				GroupId: 1,
+				Ip:      "127.0.0.1",
+				Port:    3306,
+				Player: &dbprotooption.Player{
+					PlayerId: 111,
+					Name:     "foo\\0bar,foo\\nbar,foo\\rbar,foo\\Zbar,foo\\\"bar,foo\\\\bar,foo\\'bar",
+				},
+			},
+		},
+	}
+	pbMySqlDB.RegisterTable(&dbprotooption.GolangTest{})
+	mysqlConfig := GetMysqlConfig()
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	db := sql.OpenDB(conn)
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
+	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	if err != nil {
+		return
+	}
+
+	pbLoadList := &dbprotooption.GolangTestList{}
+	err = pbMySqlDB.FindAllByWhereCase(pbLoadList, "where group_id=1")
+	if err != nil {
+		log.Fatal(err)
+		return
+	}
+	if !proto.Equal(pbSaveList, pbLoadList) {
+		fmt.Println(pbSaveList.String())
+		fmt.Println(pbLoadList.String())
+		t.Error("pb not equal")
 	}
 }
