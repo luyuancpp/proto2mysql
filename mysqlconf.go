@@ -1,4 +1,4 @@
-package protobuf_to_mysql
+package proto2mysql
 
 import (
 	"github.com/go-sql-driver/mysql"
