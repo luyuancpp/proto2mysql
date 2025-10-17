@@ -71,8 +71,9 @@ type MessageTable struct {
 	fieldsListSQL                string
 	replaceSQL                   string
 	insertSQL                    string
-	insertSQLTemplate            string // 缓存INSERT模板
-	deleteByPKTemplate           string // 缓存按主键删除模板
+	insertSQLTemplate            string   // 缓存INSERT模板
+	deleteByPKTemplate           string   // 缓存按主键删除模板
+	nullableFields               []string // 允许为NULL的字段
 
 	// 性能优化：缓存字段名到描述符的映射
 	fieldNameToDesc map[string]protoreflect.FieldDescriptor
@@ -95,16 +96,37 @@ func (m *MessageTable) DefaultInstance() proto.Message {
 func (m *MessageTable) getMySQLFieldType(fieldDesc protoreflect.FieldDescriptor) string {
 	// 特殊处理Timestamp类型
 	if fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
-		return "DATETIME NOT NULL"
+		baseType := "DATETIME NOT NULL"
+		// 检查是否为 nullable 字段
+		fieldName := string(fieldDesc.Name())
+		for _, nullable := range m.nullableFields {
+			if nullable == fieldName {
+				baseType = "DATETIME"
+				break
+			}
+		}
+		return baseType
 	}
 
 	if fieldDesc.IsMap() || fieldDesc.IsList() {
 		return "MEDIUMBLOB" // 集合类型统一用MEDIUMBLOB
 	}
-	if t, ok := MySQLFieldTypes[fieldDesc.Kind()]; ok {
-		return t
+
+	fieldName := string(fieldDesc.Name())
+	baseType, ok := MySQLFieldTypes[fieldDesc.Kind()]
+	if !ok {
+		baseType = "TEXT" // 默认类型
 	}
-	return "TEXT" // 默认类型
+
+	// 处理 nullable 字段
+	for _, nullable := range m.nullableFields {
+		if nullable == fieldName {
+			baseType = strings.ReplaceAll(baseType, " NOT NULL", "")
+			break
+		}
+	}
+
+	return baseType
 }
 
 // PbMysqlDB 管理所有表的数据库实例（移除事务相关）
@@ -1493,6 +1515,13 @@ func WithUniqueKey(uniqueKey string) TableOption {
 func WithAutoIncrementKey(key string) TableOption {
 	return func(t *MessageTable) {
 		t.autoIncreaseKey = key
+	}
+}
+
+// WithNullableFields 设置允许为NULL的字段
+func WithNullableFields(fields ...string) TableOption {
+	return func(t *MessageTable) {
+		t.nullableFields = fields
 	}
 }
 
