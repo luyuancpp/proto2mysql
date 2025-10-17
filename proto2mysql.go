@@ -34,7 +34,7 @@ type MessageTable struct {
 	tableName                    string
 	defaultInstance              proto.Message
 	options                      protoreflect.Message
-	primaryKeyField              protoreflect.FieldDescriptor // 已修复：初始化主键字段描述符
+	primaryKeyField              protoreflect.FieldDescriptor // 主键字段描述符
 	autoIncrement                uint64
 	fields                       map[int]string
 	primaryKey                   []string
@@ -50,8 +50,8 @@ type MessageTable struct {
 	fieldsListSQL      string
 	replaceSQL         string
 	insertSQL          string
-	insertSQLTemplate  string // 优化：缓存INSERT模板
-	deleteByPKTemplate string // 优化：缓存按主键删除模板
+	insertSQLTemplate  string // 缓存INSERT模板
+	deleteByPKTemplate string // 缓存按主键删除模板
 }
 
 func (m *MessageTable) SetAutoIncrement(autoIncrement uint64) {
@@ -60,6 +60,17 @@ func (m *MessageTable) SetAutoIncrement(autoIncrement uint64) {
 
 func (m *MessageTable) DefaultInstance() proto.Message {
 	return m.defaultInstance
+}
+
+// 获取字段对应的MySQL目标类型
+func (m *MessageTable) getMySQLFieldType(fieldDesc protoreflect.FieldDescriptor) string {
+	if fieldDesc.IsMap() || fieldDesc.IsList() {
+		return "MEDIUMBLOB" // 集合类型统一用MEDIUMBLOB
+	}
+	if t, ok := MySQLFieldTypes[fieldDesc.Kind()]; ok {
+		return t
+	}
+	return "TEXT" // 默认类型
 }
 
 type PbMysqlDB struct {
@@ -75,7 +86,7 @@ func (p *PbMysqlDB) OpenDB(db *sql.DB, dbname string) error {
 	return err
 }
 
-// 序列化字段（优化：浮点数格式化）
+// 序列化字段
 func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor) string {
 	reflection := message.ProtoReflect()
 
@@ -109,7 +120,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 	case protoreflect.Uint32Kind:
 		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint())
 	case protoreflect.FloatKind:
-		return fmt.Sprintf("%g", reflection.Get(fieldDesc).Float()) // 优化：%g去除多余小数
+		return fmt.Sprintf("%g", reflection.Get(fieldDesc).Float())
 	case protoreflect.StringKind:
 		return reflection.Get(fieldDesc).String()
 	case protoreflect.Int64Kind:
@@ -117,7 +128,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 	case protoreflect.Uint64Kind:
 		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint())
 	case protoreflect.DoubleKind:
-		return fmt.Sprintf("%g", reflection.Get(fieldDesc).Float()) // 优化：%g去除多余小数
+		return fmt.Sprintf("%g", reflection.Get(fieldDesc).Float())
 	case protoreflect.BoolKind:
 		return fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool())
 	case protoreflect.EnumKind:
@@ -138,7 +149,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 	return ""
 }
 
-// 反序列化字段（优化：处理NULL和optional字段）
+// 反序列化字段
 func ParseFromString(message proto.Message, row []string) error {
 	reflection := message.ProtoReflect()
 	desc := reflection.Descriptor()
@@ -184,9 +195,8 @@ func ParseFromString(message proto.Message, row []string) error {
 			continue
 		}
 
-		// 非集合类型处理（优化：区分空字符串和NULL）
+		// 非集合类型处理
 		if fieldValue == "" {
-			// 非optional字段设默认值
 			switch fieldDesc.Kind() {
 			case protoreflect.Int32Kind, protoreflect.Int64Kind:
 				reflection.Set(fieldDesc, protoreflect.ValueOfInt64(0))
@@ -287,12 +297,12 @@ func (l *ListWrapper) ProtoReflect() protoreflect.Message {
 	return protoreflect.Message(nil)
 }
 
-// MySQLFieldTypes MySQL字段类型映射表（添加索引校验）
+// MySQLFieldTypes MySQL字段类型映射表
 var MySQLFieldTypes = map[protoreflect.Kind]string{
 	protoreflect.Int32Kind:   "int NOT NULL",
 	protoreflect.Uint32Kind:  "int unsigned NOT NULL",
 	protoreflect.FloatKind:   "float NOT NULL DEFAULT '0'",
-	protoreflect.StringKind:  "TEXT",
+	protoreflect.StringKind:  "TEXT", // 可改为MEDIUMTEXT等类型，会自动同步
 	protoreflect.Int64Kind:   "bigint NOT NULL",
 	protoreflect.Uint64Kind:  "bigint unsigned NOT NULL",
 	protoreflect.DoubleKind:  "double NOT NULL DEFAULT '0'",
@@ -302,8 +312,40 @@ var MySQLFieldTypes = map[protoreflect.Kind]string{
 	protoreflect.MessageKind: "MEDIUMBLOB",
 }
 
+// 清理MySQL类型字符串（移除修饰符）
+func cleanMySQLType(colType string) string {
+	parts := strings.Fields(strings.ToLower(colType))
+	if len(parts) == 0 {
+		return ""
+	}
+	return parts[0]
+}
+
+// 判断两个MySQL类型是否匹配
+func isTypeMatch(currentType, targetType string) bool {
+	cleanCurrent := cleanMySQLType(currentType)
+	cleanTarget := cleanMySQLType(targetType)
+
+	typeMap := map[string]string{
+		"bool":       "tinyint",
+		"mediumtext": "mediumtext",
+		"text":       "text",
+		"blob":       "blob",
+		"mediumblob": "mediumblob",
+	}
+
+	current := typeMap[cleanCurrent]
+	if current == "" {
+		current = cleanCurrent
+	}
+	target := typeMap[cleanTarget]
+	if target == "" {
+		target = cleanTarget
+	}
+	return current == target
+}
+
 // GetCreateTableSQL 生成创建表的SQL语句
-// GetCreateTableSQL 生成创建表的SQL语句（完整实现）
 func (m *MessageTable) GetCreateTableSQL() string {
 	stmt := fmt.Sprintf("CREATE TABLE IF NOT EXISTS %s (\n", m.tableName)
 	fields := []string{}
@@ -316,10 +358,7 @@ func (m *MessageTable) GetCreateTableSQL() string {
 		fieldName := string(field.Name())
 
 		// 获取MySQL字段类型
-		fieldType, ok := MySQLFieldTypes[field.Kind()]
-		if !ok {
-			fieldType = "varchar(256)" // 默认类型
-		}
+		fieldType := m.getMySQLFieldType(field)
 
 		// 处理自增字段
 		if m.autoIncreaseKey == fieldName {
@@ -371,31 +410,81 @@ func (m *MessageTable) GetCreateTableSQL() string {
 	return stmt
 }
 
-// GetAlterTableAddFieldSQL 生成添加字段的ALTER语句
-func (m *MessageTable) GetAlterTableAddFieldSQL() string {
-	stmt := "ALTER TABLE " + m.tableName
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		field := m.Descriptor.Fields().Get(i)
-		sqlFieldName, ok := m.fields[i]
-		fieldName := string(field.Name())
-		if ok && sqlFieldName == fieldName {
-			continue
-		}
-		fieldType, ok := MySQLFieldTypes[field.Kind()]
-		if !ok {
-			log.Printf("warning: unknown field kind %v for field %s, using default type", field.Kind(), fieldName)
-			fieldType = "varchar(256)"
-		}
-		stmt += " ADD COLUMN " + fieldName + " " + fieldType
-		if i+1 < m.Descriptor.Fields().Len() {
-			stmt += ","
-		}
+// 获取表当前字段结构信息
+func (p *PbMysqlDB) getTableColumns(tableName string) (map[string]string, error) {
+	query := `
+		SELECT COLUMN_NAME, COLUMN_TYPE 
+		FROM INFORMATION_SCHEMA.COLUMNS 
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+	`
+	rows, err := p.DB.Query(query, p.DBName, tableName)
+	if err != nil {
+		return nil, err
 	}
-	stmt += ";"
-	return stmt
+	defer rows.Close()
+
+	columns := make(map[string]string)
+	for rows.Next() {
+		var colName, colType string
+		if err := rows.Scan(&colName, &colType); err != nil {
+			return nil, err
+		}
+		columns[colName] = colType
+	}
+	return columns, nil
 }
 
-// GetInsertSQLWithArgs 生成参数化的INSERT语句（优化：复用缓存模板）
+// UpdateTableField 同步表字段（新增字段+修改类型不匹配的字段）
+func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
+	tableName := GetTableName(m)
+	table, ok := p.Tables[tableName]
+	if !ok {
+		return ErrTableNotFound
+	}
+
+	// 1. 获取当前表的字段结构
+	currentCols, err := p.getTableColumns(tableName)
+	if err != nil {
+		return fmt.Errorf("获取表结构失败: %w", err)
+	}
+
+	// 2. 遍历Protobuf字段，计算需要修改的字段
+	var alterSQLs []string
+	desc := m.ProtoReflect().Descriptor()
+
+	for i := 0; i < desc.Fields().Len(); i++ {
+		fieldDesc := desc.Fields().Get(i)
+		fieldName := string(fieldDesc.Name())
+
+		// 获取目标类型（来自MySQLFieldTypes映射）
+		targetType := table.getMySQLFieldType(fieldDesc)
+
+		// 字段已存在，检查类型是否匹配
+		if currentType, exists := currentCols[fieldName]; exists {
+			if !isTypeMatch(currentType, targetType) {
+				// 类型不匹配，添加修改语句
+				alterSQLs = append(alterSQLs, fmt.Sprintf("MODIFY COLUMN `%s` %s", fieldName, targetType))
+			}
+			delete(currentCols, fieldName) // 标记为已处理
+		} else {
+			// 字段不存在，添加新增语句
+			alterSQLs = append(alterSQLs, fmt.Sprintf("ADD COLUMN `%s` %s", fieldName, targetType))
+		}
+	}
+
+	// 3. 执行ALTER语句（如果有需要修改的内容）
+	if len(alterSQLs) > 0 {
+		alterSQL := fmt.Sprintf("ALTER TABLE `%s` %s", tableName, strings.Join(alterSQLs, ", "))
+		_, err := p.DB.Exec(alterSQL)
+		if err != nil {
+			return fmt.Errorf("执行ALTER语句失败: %w, SQL: %s", err, alterSQL)
+		}
+	}
+
+	return nil
+}
+
+// GetInsertSQLWithArgs 生成参数化的INSERT语句
 func (m *MessageTable) GetInsertSQLWithArgs(message proto.Message) *SqlWithArgs {
 	var args []interface{}
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
@@ -432,7 +521,7 @@ func (m *MessageTable) GetInsertOnDupUpdateSQLWithArgs(message proto.Message) *S
 	return &SqlWithArgs{Sql: fullSQL, Args: fullArgs}
 }
 
-// GetInsertOnDupKeyForPrimaryKeyWithArgs 生成参数化的INSERT...更新主键语句（修复：校验主键字段）
+// GetInsertOnDupKeyForPrimaryKeyWithArgs 生成参数化的INSERT...更新主键语句
 func (m *MessageTable) GetInsertOnDupKeyForPrimaryKeyWithArgs(message proto.Message) *SqlWithArgs {
 	if m.primaryKeyField == nil {
 		return nil
@@ -516,7 +605,7 @@ func (m *MessageTable) GetSelectSQL(includeSemicolon bool) string {
 	return m.selectAllSQLWithoutSemicolon
 }
 
-// GetDeleteSQLWithArgs 生成参数化的按主键删除语句（修复：校验主键字段）
+// GetDeleteSQLWithArgs 生成参数化的按主键删除语句
 func (m *MessageTable) GetDeleteSQLWithArgs(message proto.Message) *SqlWithArgs {
 	if m.primaryKeyField == nil {
 		return nil
@@ -666,7 +755,7 @@ func (p *PbMysqlDB) Update(message proto.Message) error {
 	return nil
 }
 
-// Init 初始化MessageTable的SQL片段（修复：初始化primaryKeyField；优化：缓存SQL模板）
+// Init 初始化MessageTable的SQL片段
 func (m *MessageTable) Init() {
 	// 构建字段列表
 	needComma := false
@@ -684,14 +773,14 @@ func (m *MessageTable) Init() {
 	m.selectAllSQLWithSemicolon = m.selectFieldsSQL + ";"
 	m.selectAllSQLWithoutSemicolon = m.selectFieldsSQL + " "
 
-	// 初始化插入/替换相关SQL片段（优化：缓存模板）
+	// 初始化插入/替换相关SQL片段
 	placeholders := strings.Repeat("?, ", strings.Count(m.fieldsListSQL, ",")+1)
 	placeholders = strings.TrimSuffix(placeholders, ", ")
 	m.insertSQLTemplate = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", m.tableName, m.fieldsListSQL, placeholders)
 	m.replaceSQL = "REPLACE INTO " + m.tableName + " (" + m.fieldsListSQL + ") VALUES ("
 	m.insertSQL = "INSERT INTO " + m.tableName + " (" + m.fieldsListSQL + ") VALUES "
 
-	// 修复：初始化主键字段描述符
+	// 初始化主键字段描述符
 	if len(m.primaryKey) > 0 {
 		m.primaryKeyField = m.Descriptor.Fields().ByName(protoreflect.Name(m.primaryKey[PrimaryKeyIndex]))
 		// 缓存按主键删除模板
@@ -726,94 +815,6 @@ func (p *PbMysqlDB) GetCreateTableSQL(message proto.Message) string {
 		return ""
 	}
 	return table.GetCreateTableSQL()
-}
-
-// GetAlterTableModifyFieldSQL 生成修改字段的ALTER语句
-func (m *MessageTable) GetAlterTableModifyFieldSQL() string {
-	stmt := "ALTER TABLE " + m.tableName
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		field := m.Descriptor.Fields().Get(i)
-		sqlFieldName, ok := m.fields[i]
-		fieldName := string(field.Name())
-		if ok && sqlFieldName == fieldName {
-			continue
-		}
-		fieldType, ok := MySQLFieldTypes[field.Kind()]
-		if !ok {
-			log.Printf("warning: unknown field kind %v for field %s, using default type", field.Kind(), fieldName)
-			fieldType = "varchar(256)"
-		}
-		stmt += " CHANGE COLUMN " + sqlFieldName + " " + fieldName + " " + fieldType + ","
-	}
-	stmt = strings.TrimSuffix(stmt, ",")
-	stmt += ";"
-	return stmt
-}
-
-// UpdateTableField 批量更新表字段（先修改再添加）
-func (p *PbMysqlDB) UpdateTableField(message proto.Message) error {
-	if err := p.AlterModifyTableField(message); err != nil {
-		return err
-	}
-	return p.AlterAddTableField(message)
-}
-
-// AlterAddTableField 执行添加字段的ALTER操作
-func (p *PbMysqlDB) AlterAddTableField(message proto.Message) error {
-	tableName := GetTableName(message)
-	table, ok := p.Tables[tableName]
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
-	}
-
-	query := fmt.Sprintf("SELECT COLUMN_NAME,ORDINAL_POSITION FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s';",
-		p.DBName, table.tableName)
-	rows, err := p.DB.Query(query)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	fieldIndex := 0
-	var fieldName string
-	for rows.Next() {
-		if err := rows.Scan(&fieldName, &fieldIndex); err != nil {
-			return fmt.Errorf("scan row failed: %w", err)
-		}
-		table.fields[fieldIndex-1] = fieldName
-	}
-
-	_, err = p.DB.Exec(table.GetAlterTableAddFieldSQL())
-	return err
-}
-
-// AlterModifyTableField 执行修改字段的ALTER操作
-func (p *PbMysqlDB) AlterModifyTableField(message proto.Message) error {
-	tableName := GetTableName(message)
-	table, ok := p.Tables[tableName]
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
-	}
-
-	query := fmt.Sprintf("SELECT COLUMN_NAME,ORDINAL_POSITION FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_SCHEMA = '%s' AND TABLE_NAME = '%s';",
-		p.DBName, table.tableName)
-	rows, err := p.DB.Query(query)
-	if err != nil {
-		return err
-	}
-	defer rows.Close()
-
-	fieldIndex := 0
-	var fieldName string
-	for rows.Next() {
-		if err := rows.Scan(&fieldName, &fieldIndex); err != nil {
-			return fmt.Errorf("scan row failed: %w", err)
-		}
-		table.fields[fieldIndex-1] = fieldName
-	}
-
-	_, err = p.DB.Exec(table.GetAlterTableModifyFieldSQL())
-	return err
 }
 
 // Save 执行参数化的REPLACE操作
@@ -887,13 +888,13 @@ func (p *PbMysqlDB) FindOneByWhereWithArgs(message proto.Message, whereClause st
 	return nil
 }
 
-// FindAll 执行全表查询（批量数据，修复：校验列表结构）
+// FindAll 执行全表查询（批量数据）
 func (p *PbMysqlDB) FindAll(message proto.Message) error {
 	reflectionParent := message.ProtoReflect()
 	md := reflectionParent.Descriptor()
 	fieldDescriptors := md.Fields()
 
-	// 修复：校验列表消息结构（必须有且仅有一个repeated字段）
+	// 校验列表消息结构
 	var listField protoreflect.FieldDescriptor
 	for i := 0; i < fieldDescriptors.Len(); i++ {
 		fd := fieldDescriptors.Get(i)
@@ -952,13 +953,13 @@ func (p *PbMysqlDB) FindAll(message proto.Message) error {
 	return nil
 }
 
-// FindAllByWhereWithArgs 执行参数化的自定义WHERE查询（批量数据，修复：校验列表结构）
+// FindAllByWhereWithArgs 执行参数化的自定义WHERE查询（批量数据）
 func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
 	reflectionParent := message.ProtoReflect()
 	md := reflectionParent.Descriptor()
 	fieldDescriptors := md.Fields()
 
-	// 修复：校验列表消息结构
+	// 校验列表消息结构
 	var listField protoreflect.FieldDescriptor
 	for i := 0; i < fieldDescriptors.Len(); i++ {
 		fd := fieldDescriptors.Get(i)
@@ -1068,7 +1069,7 @@ func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause stri
 	md := reflectionParent.Descriptor()
 	fieldDescriptors := md.Fields()
 
-	// 修复：校验列表消息结构
+	// 校验列表消息结构
 	var listField protoreflect.FieldDescriptor
 	for i := 0; i < fieldDescriptors.Len(); i++ {
 		fd := fieldDescriptors.Get(i)

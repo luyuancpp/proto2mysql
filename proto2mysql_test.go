@@ -7,6 +7,7 @@ import (
 	"github.com/go-sql-driver/mysql"
 	"github.com/luyuancpp/dbprotooption"
 	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 	"log"
 	"os"
 	"sort"
@@ -1135,5 +1136,59 @@ func TestBatchOperations(t *testing.T) {
 
 	if len(list.TestList) != batchSize {
 		t.Errorf("批量查询结果数量不匹配: 预期 %d，实际 %d", batchSize, len(list.TestList))
+	}
+}
+
+// TestUpdateFieldType 测试字段类型自动更新
+func TestUpdateFieldType(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	testTable := &dbprotooption.GolangTest{}
+	pbMySqlDB.RegisterTable(testTable)
+
+	mysqlConfig := GetMysqlConfig()
+	if mysqlConfig == nil {
+		t.Fatal("获取MySQL配置失败")
+	}
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		t.Fatalf("创建连接器失败: %v", err)
+	}
+	db := sql.OpenDB(conn)
+	defer db.Close()
+
+	if err := db.Ping(); err != nil {
+		t.Fatalf("连接数据库失败: %v", err)
+	}
+	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
+		t.Fatalf("切换数据库失败: %v", err)
+	}
+
+	// 1. 先创建表（使用初始类型）
+	createSQL := pbMySqlDB.GetCreateTableSQL(testTable)
+	if _, err := db.Exec(createSQL); err != nil {
+		t.Fatalf("创建表失败: %v", err)
+	}
+
+	// 2. 修改MySQLFieldTypes映射（例如将StringKind从TEXT改为MEDIUMTEXT）
+	oldType := MySQLFieldTypes[protoreflect.StringKind]
+	MySQLFieldTypes[protoreflect.StringKind] = "MEDIUMTEXT NOT NULL"
+	defer func() {
+		// 测试后恢复原类型
+		MySQLFieldTypes[protoreflect.StringKind] = oldType
+	}()
+
+	// 3. 执行更新字段操作
+	if err := pbMySqlDB.UpdateTableField(testTable); err != nil {
+		t.Fatalf("更新字段类型失败: %v", err)
+	}
+
+	// 4. 验证类型是否已修改
+	cols, err := pbMySqlDB.getTableColumns(GetTableName(testTable))
+	if err != nil {
+		t.Fatalf("查询表结构失败: %v", err)
+	}
+	// 假设GolangTest中有string类型的字段（如Ip）
+	if colType := cols["ip"]; !strings.Contains(colType, "mediumtext") {
+		t.Errorf("字段类型未更新，预期包含mediumtext，实际为: %s", colType)
 	}
 }
