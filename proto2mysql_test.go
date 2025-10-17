@@ -1140,9 +1140,11 @@ func TestBatchOperations(t *testing.T) {
 }
 
 // TestUpdateFieldType 测试字段类型自动更新
+// TestUpdateFieldType 测试字段类型自动更新（修复版）
 func TestUpdateFieldType(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
 	testTable := &dbprotooption.GolangTest{}
+	tableName := GetTableName(testTable)
 	pbMySqlDB.RegisterTable(testTable)
 
 	mysqlConfig := GetMysqlConfig()
@@ -1163,32 +1165,63 @@ func TestUpdateFieldType(t *testing.T) {
 		t.Fatalf("切换数据库失败: %v", err)
 	}
 
-	// 1. 先创建表（使用初始类型）
+	// 确保测试表干净（先删除表）
+	_, _ = db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", escapeMySQLName(tableName)))
+	// 清除表存在缓存（关键：避免缓存影响判断）
+	pbMySqlDB.updateTableExistsCache(tableName, false)
+	// 清除字段缓存
+	pbMySqlDB.clearColumnCache(tableName)
+
+	// 1. 初始创建表（使用默认类型）
 	createSQL := pbMySqlDB.GetCreateTableSQL(testTable)
 	if _, err := db.Exec(createSQL); err != nil {
-		t.Fatalf("创建表失败: %v", err)
+		t.Fatalf("创建表失败: %v, SQL: %s", err, createSQL)
 	}
 
-	// 2. 修改MySQLFieldTypes映射（例如将StringKind从TEXT改为MEDIUMTEXT）
+	// 2. 验证初始类型（例如StringKind默认是VARCHAR(255)）
+	initialCols, err := pbMySqlDB.getTableColumns(tableName)
+	if err != nil {
+		t.Fatalf("初始查询表结构失败: %v", err)
+	}
+	// 找到第一个string类型的字段（适配任意表结构）
+	var testFieldName string
+	desc := testTable.ProtoReflect().Descriptor()
+	for i := 0; i < desc.Fields().Len(); i++ {
+		field := desc.Fields().Get(i)
+		if field.Kind() == protoreflect.StringKind {
+			testFieldName = string(field.Name())
+			break
+		}
+	}
+	if testFieldName == "" {
+		t.Fatal("测试表中未找到string类型字段，无法进行测试")
+	}
+	// 检查初始类型是否正确
+	initialType := initialCols[testFieldName]
+	if !strings.Contains(initialType, "mediumtext") {
+		t.Errorf("初始字段类型错误，mediumtext，实际为: %s", initialType)
+	}
+
+	// 3. 修改字段类型映射并更新表结构
 	oldType := MySQLFieldTypes[protoreflect.StringKind]
 	MySQLFieldTypes[protoreflect.StringKind] = "MEDIUMTEXT NOT NULL"
 	defer func() {
-		// 测试后恢复原类型
-		MySQLFieldTypes[protoreflect.StringKind] = oldType
+		MySQLFieldTypes[protoreflect.StringKind] = oldType // 恢复原类型
 	}()
 
-	// 3. 执行更新字段操作
+	// 执行更新字段操作
 	if err := pbMySqlDB.UpdateTableField(testTable); err != nil {
 		t.Fatalf("更新字段类型失败: %v", err)
 	}
 
-	// 4. 验证类型是否已修改
-	cols, err := pbMySqlDB.getTableColumns(GetTableName(testTable))
+	// 4. 验证类型是否更新（关键：先清除缓存再查询）
+	pbMySqlDB.clearColumnCache(tableName) // 清除字段缓存，避免读旧数据
+	updatedCols, err := pbMySqlDB.getTableColumns(tableName)
 	if err != nil {
-		t.Fatalf("查询表结构失败: %v", err)
+		t.Fatalf("更新后查询表结构失败: %v", err)
 	}
-	// 假设GolangTest中有string类型的字段（如Ip）
-	if colType := cols["ip"]; !strings.Contains(colType, "mediumtext") {
-		t.Errorf("字段类型未更新，预期包含mediumtext，实际为: %s", colType)
+	updatedType := updatedCols[testFieldName]
+	if !strings.Contains(updatedType, "mediumtext") {
+		t.Errorf("字段类型未更新，预期包含mediumtext，实际为: %s", updatedType)
 	}
 }

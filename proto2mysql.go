@@ -19,9 +19,10 @@ import (
 
 // 常量定义
 const (
-	PrimaryKeyIndex = 0
-	// MySQL关键字列表（基础版）
-	mysqlKeywordPattern = `^(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|AND|OR|JOIN|ON|IN|NOT|NULL|PRIMARY|KEY|INDEX|UNIQUE|AUTO_INCREMENT)$`
+	PrimaryKeyIndex    = 0
+	BatchInsertMaxSize = 1000 // 批量插入最大条数
+	// MySQL关键字列表（增强版）
+	mysqlKeywordPattern = `^(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|AND|OR|JOIN|ON|IN|NOT|NULL|PRIMARY|KEY|INDEX|UNIQUE|AUTO_INCREMENT|INT|VARCHAR|TEXT|BLOB|DATETIME|TIMESTAMP|FLOAT|DOUBLE|BOOL|TINYINT|BIGINT)$`
 )
 
 var (
@@ -40,6 +41,9 @@ var (
 	ErrInvalidSQLTemplate   = errors.New("invalid SQL template")
 	ErrTypeConversionFailed = errors.New("type conversion failed")
 	ErrKeywordConflict      = errors.New("field name conflicts with MySQL keyword")
+	ErrMultipleRowsFound    = errors.New("multiple rows found")
+	ErrNoRowsFound          = errors.New("no rows found")
+	ErrBatchSizeExceeded    = fmt.Errorf("batch size exceeds maximum %d", BatchInsertMaxSize)
 )
 
 // SqlWithArgs 存储带?占位符的SQL和对应的参数列表
@@ -55,14 +59,12 @@ type MessageTable struct {
 	options                      protoreflect.Message
 	primaryKeyField              protoreflect.FieldDescriptor
 	autoIncrement                uint64
-	fields                       map[int]string    // 字段索引到名称的映射
-	fieldComments                map[string]string // 字段注释（从protobuf提取）
-	primaryKey                   []string          // 主键字段列表
-	indexes                      []string          // 普通索引（逗号分隔字段）
-	uniqueKeys                   string            // 唯一键（逗号分隔字段）
-	autoIncreaseKey              string            // 自增字段名
+	fields                       map[int]string // 字段索引到名称的映射
+	primaryKey                   []string       // 主键字段列表
+	indexes                      []string       // 普通索引（逗号分隔字段）
+	uniqueKeys                   string         // 唯一键（逗号分隔字段）
+	autoIncreaseKey              string         // 自增字段名
 	Descriptor                   protoreflect.MessageDescriptor
-	DB                           *sql.DB
 	selectAllSQLWithSemicolon    string
 	selectAllSQLWithoutSemicolon string
 	selectFieldsSQL              string
@@ -105,7 +107,7 @@ func (m *MessageTable) getMySQLFieldType(fieldDesc protoreflect.FieldDescriptor)
 	return "TEXT" // 默认类型
 }
 
-// PbMysqlDB 管理所有表的数据库实例
+// PbMysqlDB 管理所有表的数据库实例（移除事务相关）
 type PbMysqlDB struct {
 	Tables        map[string]*MessageTable
 	DB            *sql.DB
@@ -135,7 +137,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		}
 		ts := &timestamppb.Timestamp{}
 		if err := proto.Unmarshal(reflection.Get(fieldDesc).Bytes(), ts); err != nil {
-			return "", fmt.Errorf("serialize timestamp: %w", err)
+			return "", fmt.Errorf("serialize timestamp field %s: %w", fieldDesc.Name(), err)
 		}
 		return ts.AsTime().Format("2006-01-02 15:04:05"), nil
 	}
@@ -147,7 +149,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		mapWrapper := &MapWrapper{MapData: reflection.Get(fieldDesc).Map()}
 		data, err := proto.Marshal(mapWrapper)
 		if err != nil {
-			return "", fmt.Errorf("serialize map: %w", err)
+			return "", fmt.Errorf("serialize map field %s: %w", fieldDesc.Name(), err)
 		}
 		return string(data), nil
 	}
@@ -159,7 +161,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		listWrapper := &ListWrapper{ListData: reflection.Get(fieldDesc).List()}
 		data, err := proto.Marshal(listWrapper)
 		if err != nil {
-			return "", fmt.Errorf("serialize list: %w", err)
+			return "", fmt.Errorf("serialize list field %s: %w", fieldDesc.Name(), err)
 		}
 		return string(data), nil
 	}
@@ -190,13 +192,13 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 			subMsg := reflection.Get(fieldDesc).Message()
 			data, err := proto.Marshal(subMsg.Interface())
 			if err != nil {
-				return "", fmt.Errorf("marshal sub-message: %w", err)
+				return "", fmt.Errorf("marshal sub-message field %s: %w", fieldDesc.Name(), err)
 			}
 			return string(data), nil
 		}
 		return "", nil
 	default:
-		return "", fmt.Errorf("%w: %v", ErrInvalidFieldKind, fieldDesc.Kind())
+		return "", fmt.Errorf("%w: %v (field: %s)", ErrInvalidFieldKind, fieldDesc.Kind(), fieldDesc.Name())
 	}
 }
 
@@ -212,6 +214,7 @@ func ParseFromString(message proto.Message, row []string) error {
 
 		fieldDesc := desc.Fields().Get(i)
 		fieldValue := row[i]
+		fieldName := fieldDesc.Name()
 
 		// 特殊处理Timestamp类型
 		if fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
@@ -220,12 +223,12 @@ func ParseFromString(message proto.Message, row []string) error {
 			}
 			t, err := time.Parse("2006-01-02 15:04:05", fieldValue)
 			if err != nil {
-				return fmt.Errorf("parse timestamp (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse timestamp field %s: %w (value: %s)", fieldName, err, fieldValue)
 			}
 			ts := timestamppb.New(t)
 			data, err := proto.Marshal(ts)
 			if err != nil {
-				return fmt.Errorf("marshal timestamp (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("marshal timestamp field %s: %w", fieldName, err)
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfBytes(data))
 			continue
@@ -238,7 +241,7 @@ func ParseFromString(message proto.Message, row []string) error {
 			}
 			mapWrapper := &MapWrapper{}
 			if err := proto.Unmarshal([]byte(fieldValue), mapWrapper); err != nil {
-				return fmt.Errorf("parse map (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse map field %s: %w (value: %s)", fieldName, err, fieldValue)
 			}
 			mapVal := reflection.Mutable(fieldDesc).Map()
 			mapWrapper.MapData.Range(func(key protoreflect.MapKey, val protoreflect.Value) bool {
@@ -255,7 +258,7 @@ func ParseFromString(message proto.Message, row []string) error {
 			}
 			listWrapper := &ListWrapper{}
 			if err := proto.Unmarshal([]byte(fieldValue), listWrapper); err != nil {
-				return fmt.Errorf("parse list (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse list field %s: %w (value: %s)", fieldName, err, fieldValue)
 			}
 			listVal := reflection.Mutable(fieldDesc).List()
 			for i := 0; i < listWrapper.ListData.Len(); i++ {
@@ -286,37 +289,37 @@ func ParseFromString(message proto.Message, row []string) error {
 		case protoreflect.Int32Kind:
 			val, err := strconv.ParseInt(row[i], 10, 32)
 			if err != nil {
-				return fmt.Errorf("parse int32 (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse int32 field %s: %w (value: %s)", fieldName, err, row[i])
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfInt32(int32(val)))
 		case protoreflect.Int64Kind:
 			val, err := strconv.ParseInt(row[i], 10, 64)
 			if err != nil {
-				return fmt.Errorf("parse int64 (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse int64 field %s: %w (value: %s)", fieldName, err, row[i])
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfInt64(val))
 		case protoreflect.Uint32Kind:
 			val, err := strconv.ParseUint(row[i], 10, 32)
 			if err != nil {
-				return fmt.Errorf("parse uint32 (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse uint32 field %s: %w (value: %s)", fieldName, err, row[i])
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfUint32(uint32(val)))
 		case protoreflect.Uint64Kind:
 			val, err := strconv.ParseUint(row[i], 10, 64)
 			if err != nil {
-				return fmt.Errorf("parse uint64 (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse uint64 field %s: %w (value: %s)", fieldName, err, row[i])
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfUint64(val))
 		case protoreflect.FloatKind:
 			val, err := strconv.ParseFloat(row[i], 32)
 			if err != nil {
-				return fmt.Errorf("parse float (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse float field %s: %w (value: %s)", fieldName, err, row[i])
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfFloat32(float32(val)))
 		case protoreflect.DoubleKind:
 			val, err := strconv.ParseFloat(row[i], 64)
 			if err != nil {
-				return fmt.Errorf("parse double (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse double field %s: %w (value: %s)", fieldName, err, row[i])
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfFloat64(val))
 		case protoreflect.StringKind:
@@ -324,13 +327,13 @@ func ParseFromString(message proto.Message, row []string) error {
 		case protoreflect.BoolKind:
 			val, err := strconv.ParseBool(row[i])
 			if err != nil {
-				return fmt.Errorf("parse bool (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse bool field %s: %w (value: %s)", fieldName, err, row[i])
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfBool(val))
 		case protoreflect.EnumKind:
 			val, err := strconv.Atoi(row[i])
 			if err != nil {
-				return fmt.Errorf("parse enum (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("parse enum field %s: %w (value: %s)", fieldName, err, row[i])
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfEnum(protoreflect.EnumNumber(val)))
 		case protoreflect.BytesKind:
@@ -338,10 +341,10 @@ func ParseFromString(message proto.Message, row []string) error {
 		case protoreflect.MessageKind:
 			subMsg := reflection.Mutable(fieldDesc).Message()
 			if err := proto.Unmarshal([]byte(row[i]), subMsg.Interface()); err != nil {
-				return fmt.Errorf("unmarshal sub-message (field: %s): %w", fieldDesc.Name(), err)
+				return fmt.Errorf("unmarshal sub-message field %s: %w (value: %s)", fieldName, err, row[i])
 			}
 		default:
-			return fmt.Errorf("%w: %v (field: %s)", ErrInvalidFieldKind, fieldDesc.Kind(), fieldDesc.Name())
+			return fmt.Errorf("%w: %v (field: %s)", ErrInvalidFieldKind, fieldDesc.Kind(), fieldName)
 		}
 	}
 
@@ -371,7 +374,7 @@ var MySQLFieldTypes = map[protoreflect.Kind]string{
 	protoreflect.Int32Kind:   "int NOT NULL DEFAULT 0",
 	protoreflect.Uint32Kind:  "int unsigned NOT NULL DEFAULT 0",
 	protoreflect.FloatKind:   "float NOT NULL DEFAULT 0",
-	protoreflect.StringKind:  "VARCHAR(255) NOT NULL DEFAULT ''",
+	protoreflect.StringKind:  "MEDIUMTEXT",
 	protoreflect.Int64Kind:   "bigint NOT NULL DEFAULT 0",
 	protoreflect.Uint64Kind:  "bigint unsigned NOT NULL DEFAULT 0",
 	protoreflect.DoubleKind:  "double NOT NULL DEFAULT 0",
@@ -381,24 +384,61 @@ var MySQLFieldTypes = map[protoreflect.Kind]string{
 	protoreflect.MessageKind: "MEDIUMBLOB",
 }
 
-// 清理MySQL类型字符串
-func cleanMySQLType(colType string) string {
-	parts := strings.Fields(strings.ToLower(colType))
-	if len(parts) == 0 {
-		return ""
-	}
-	baseType := parts[0]
-	if idx := strings.Index(baseType, "("); idx != -1 {
-		baseType = baseType[:idx]
-	}
-	return baseType
+// 解析MySQL类型信息
+type mysqlTypeInfo struct {
+	baseType string
+	length   int
+	decimal  int
+	unsigned bool
 }
 
-// 判断两个MySQL类型是否匹配
-func isTypeMatch(currentType, targetType string) bool {
-	cleanCurrent := cleanMySQLType(currentType)
-	cleanTarget := cleanMySQLType(targetType)
+// 解析MySQL类型字符串
+func parseMySQLType(colType string) mysqlTypeInfo {
+	info := mysqlTypeInfo{}
+	parts := strings.Fields(strings.ToLower(colType))
 
+	if len(parts) == 0 {
+		return info
+	}
+
+	// 提取基础类型
+	basePart := parts[0]
+	if idx := strings.Index(basePart, "("); idx != -1 {
+		info.baseType = basePart[:idx]
+		// 提取长度和小数位
+		params := strings.Trim(basePart[idx:], "()")
+		if strings.Contains(params, ",") {
+			parts := strings.Split(params, ",")
+			if len(parts) >= 1 {
+				info.length, _ = strconv.Atoi(strings.TrimSpace(parts[0]))
+			}
+			if len(parts) >= 2 {
+				info.decimal, _ = strconv.Atoi(strings.TrimSpace(parts[1]))
+			}
+		} else {
+			info.length, _ = strconv.Atoi(params)
+		}
+	} else {
+		info.baseType = basePart
+	}
+
+	// 检查是否为unsigned
+	for _, part := range parts[1:] {
+		if part == "unsigned" {
+			info.unsigned = true
+			break
+		}
+	}
+
+	return info
+}
+
+// 判断两个MySQL类型是否匹配（增强版）
+func isTypeMatch(currentType, targetType string) bool {
+	current := parseMySQLType(currentType)
+	target := parseMySQLType(targetType)
+
+	// 基础类型映射表
 	typeMap := map[string]string{
 		"bool":       "tinyint",
 		"integer":    "int",
@@ -412,15 +452,35 @@ func isTypeMatch(currentType, targetType string) bool {
 		"char":       "char",
 	}
 
-	current := typeMap[cleanCurrent]
-	if current == "" {
-		current = cleanCurrent
+	// 映射基础类型
+	currentBase := typeMap[current.baseType]
+	if currentBase == "" {
+		currentBase = current.baseType
 	}
-	target := typeMap[cleanTarget]
-	if target == "" {
-		target = cleanTarget
+	targetBase := typeMap[target.baseType]
+	if targetBase == "" {
+		targetBase = target.baseType
 	}
-	return current == target
+
+	// 基础类型不匹配直接返回false
+	if currentBase != targetBase {
+		return false
+	}
+
+	// 特殊处理不同类型的长度兼容性
+	switch currentBase {
+	case "varchar", "char":
+		// 目标长度大于等于当前长度视为兼容
+		return target.length >= current.length
+	case "int", "bigint", "tinyint", "smallint":
+		// 无符号属性必须一致
+		return current.unsigned == target.unsigned
+	case "float", "double":
+		// 小数位兼容检查
+		return target.decimal >= current.decimal
+	}
+
+	return true
 }
 
 // escapeMySQLName 处理MySQL关键字冲突
@@ -447,13 +507,6 @@ func (m *MessageTable) GetCreateTableSQL() string {
 
 		if m.autoIncreaseKey == fieldName {
 			fieldType += " AUTO_INCREMENT"
-		}
-
-		// 添加字段注释（从protobuf提取）
-		comment := m.fieldComments[fieldName]
-		if comment != "" {
-			comment = strings.ReplaceAll(comment, "'", "\\'")
-			fieldType += fmt.Sprintf(" COMMENT '%s'", comment)
 		}
 
 		fields = append(fields, fmt.Sprintf("  %s %s", escapedName, fieldType))
@@ -493,11 +546,12 @@ func (m *MessageTable) GetCreateTableSQL() string {
 		stmt += ",\n" + strings.Join(indexes, ",\n")
 	}
 
+	// 表注释简化为表名
 	stmt += "\n) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci COMMENT='" + escapeMySQLComment(m.tableName) + "';"
 	return stmt
 }
 
-// escapeMySQLComment 转义MySQL注释中的特殊字符
+// escapeMySQLComment 转义MySQL注释中的特殊字符（仅保留基础转义）
 func escapeMySQLComment(comment string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(comment, "'", "\\'"), "\n", " ")
 }
@@ -506,7 +560,7 @@ func escapeMySQLComment(comment string) string {
 func (p *PbMysqlDB) getTableColumns(tableName string) (map[string]string, error) {
 	table, ok := p.Tables[tableName]
 	if !ok {
-		return nil, ErrTableNotFound
+		return nil, fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 	}
 
 	table.columnsMu.RLock()
@@ -523,7 +577,7 @@ func (p *PbMysqlDB) getTableColumns(tableName string) (map[string]string, error)
 	`
 	rows, err := p.DB.Query(query, p.DBName, tableName)
 	if err != nil {
-		return nil, fmt.Errorf("query columns: %w", err)
+		return nil, fmt.Errorf("query columns for table %s: %w", tableName, err)
 	}
 	defer rows.Close()
 
@@ -531,12 +585,12 @@ func (p *PbMysqlDB) getTableColumns(tableName string) (map[string]string, error)
 	for rows.Next() {
 		var colName, colType string
 		if err := rows.Scan(&colName, &colType); err != nil {
-			return nil, fmt.Errorf("scan columns: %w", err)
+			return nil, fmt.Errorf("scan columns for table %s: %w", tableName, err)
 		}
 		columns[colName] = colType
 	}
 	if err := rows.Err(); err != nil {
-		return nil, fmt.Errorf("rows error: %w", err)
+		return nil, fmt.Errorf("rows error for table %s columns: %w", tableName, err)
 	}
 
 	table.columnsMu.Lock()
@@ -560,17 +614,17 @@ func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 	tableName := GetTableName(m)
 	table, ok := p.Tables[tableName]
 	if !ok {
-		return ErrTableNotFound
+		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 	}
 
 	exists, err := p.IsTableExists(tableName)
 	if err != nil {
-		return fmt.Errorf("check table exists: %w", err)
+		return fmt.Errorf("check table %s exists: %w", tableName, err)
 	}
 	if !exists {
 		createSQL := table.GetCreateTableSQL()
 		if _, err := p.DB.Exec(createSQL); err != nil {
-			return fmt.Errorf("create table: %w, SQL: %s", err, createSQL)
+			return fmt.Errorf("create table %s: %w, SQL: %s", tableName, err, createSQL)
 		}
 		p.updateTableExistsCache(tableName, true)
 		return nil
@@ -578,7 +632,7 @@ func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 
 	currentCols, err := p.getTableColumns(tableName)
 	if err != nil {
-		return fmt.Errorf("get table columns: %w", err)
+		return fmt.Errorf("get table %s columns: %w", tableName, err)
 	}
 
 	var alterSQLs []string
@@ -589,7 +643,7 @@ func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 		fieldName := string(fieldDesc.Name())
 
 		if keywordRegex.MatchString(strings.ToUpper(fieldName)) {
-			log.Printf("warning: field %s conflicts with MySQL keyword", fieldName)
+			log.Printf("warning: field %s in table %s conflicts with MySQL keyword", fieldName, tableName)
 		}
 
 		targetType := table.getMySQLFieldType(fieldDesc)
@@ -608,7 +662,7 @@ func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 		alterSQL := fmt.Sprintf("ALTER TABLE %s %s", escapeMySQLName(tableName), strings.Join(alterSQLs, ", "))
 		_, err := p.DB.Exec(alterSQL)
 		if err != nil {
-			return fmt.Errorf("exec ALTER: %w, SQL: %s", err, alterSQL)
+			return fmt.Errorf("exec ALTER for table %s: %w, SQL: %s", tableName, err, alterSQL)
 		}
 		p.clearColumnCache(tableName)
 	}
@@ -633,7 +687,7 @@ func (p *PbMysqlDB) IsTableExists(tableName string) (bool, error) {
 	var count int
 	err := p.DB.QueryRow(query, p.DBName, tableName).Scan(&count)
 	if err != nil {
-		return false, fmt.Errorf("query table exists: %w", err)
+		return false, fmt.Errorf("query table %s exists: %w", tableName, err)
 	}
 	exists := count > 0
 
@@ -669,6 +723,9 @@ func (m *MessageTable) GetInsertSQLWithArgs(message proto.Message) (*SqlWithArgs
 func (m *MessageTable) GetBatchInsertSQLWithArgs(messages []proto.Message) (*SqlWithArgs, error) {
 	if len(messages) == 0 {
 		return nil, errors.New("no messages to insert")
+	}
+	if len(messages) > BatchInsertMaxSize {
+		return nil, ErrBatchSizeExceeded
 	}
 
 	firstDesc := messages[0].ProtoReflect().Descriptor()
@@ -761,7 +818,7 @@ func (m *MessageTable) GetInsertOnDupKeyForPrimaryKeyWithArgs(message proto.Mess
 	return &SqlWithArgs{Sql: fullSQL, Args: fullArgs}, nil
 }
 
-// Insert 执行参数化的INSERT操作
+// Insert 执行参数化的INSERT操作（直接用DB，无Tx）
 func (p *PbMysqlDB) Insert(message proto.Message) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
@@ -771,44 +828,53 @@ func (p *PbMysqlDB) Insert(message proto.Message) error {
 
 	sqlWithArgs, err := table.GetInsertSQLWithArgs(message)
 	if sqlWithArgs == nil || err != nil {
-		return fmt.Errorf("generate insert SQL: %w", err)
+		return fmt.Errorf("generate insert SQL for table %s: %w", tableName, err)
 	}
 
 	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
-		return fmt.Errorf("exec insert: sql=%s, args=%v, err=%w",
-			sqlWithArgs.Sql, sqlWithArgs.Args, err)
+		return fmt.Errorf("exec insert for table %s: sql=%s, args=%v, err=%w",
+			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
 	}
-
 	return nil
 }
 
-// BatchInsert 执行批量INSERT操作
+// BatchInsert 执行批量INSERT操作（直接用DB，无Tx）
 func (p *PbMysqlDB) BatchInsert(messages []proto.Message) error {
 	if len(messages) == 0 {
 		return errors.New("no messages to insert")
 	}
-	tableName := GetTableName(messages[0])
-	table, ok := p.Tables[tableName]
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
-	}
 
-	sqlWithArgs, err := table.GetBatchInsertSQLWithArgs(messages)
-	if sqlWithArgs == nil || err != nil {
-		return fmt.Errorf("generate batch insert SQL: %w", err)
-	}
+	// 分批处理大批量数据
+	for i := 0; i < len(messages); i += BatchInsertMaxSize {
+		end := i + BatchInsertMaxSize
+		if end > len(messages) {
+			end = len(messages)
+		}
+		batch := messages[i:end]
 
-	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
-	if err != nil {
-		return fmt.Errorf("exec batch insert: sql=%s, args len=%d, err=%w",
-			sqlWithArgs.Sql, len(sqlWithArgs.Args), err)
+		tableName := GetTableName(batch[0])
+		table, ok := p.Tables[tableName]
+		if !ok {
+			return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+		}
+
+		sqlWithArgs, err := table.GetBatchInsertSQLWithArgs(batch)
+		if sqlWithArgs == nil || err != nil {
+			return fmt.Errorf("generate batch insert SQL for table %s: %w", tableName, err)
+		}
+
+		_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+		if err != nil {
+			return fmt.Errorf("exec batch insert for table %s: sql=%s, args len=%d, err=%w",
+				tableName, sqlWithArgs.Sql, len(sqlWithArgs.Args), err)
+		}
 	}
 
 	return nil
 }
 
-// InsertOnDupUpdate 执行参数化的INSERT...ON DUPLICATE KEY UPDATE操作
+// InsertOnDupUpdate 执行参数化的INSERT...ON DUPLICATE KEY UPDATE操作（直接用DB，无Tx）
 func (p *PbMysqlDB) InsertOnDupUpdate(message proto.Message) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
@@ -818,22 +884,21 @@ func (p *PbMysqlDB) InsertOnDupUpdate(message proto.Message) error {
 
 	sqlWithArgs, err := table.GetInsertOnDupUpdateSQLWithArgs(message)
 	if sqlWithArgs == nil || err != nil {
-		return fmt.Errorf("generate insert on dup update SQL: %w", err)
+		return fmt.Errorf("generate insert on dup update SQL for table %s: %w", tableName, err)
 	}
 
 	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
-		return fmt.Errorf("exec insert on dup update: sql=%s, args=%v, err=%w",
-			sqlWithArgs.Sql, sqlWithArgs.Args, err)
+		return fmt.Errorf("exec insert on dup update for table %s: sql=%s, args=%v, err=%w",
+			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
 	}
-
 	return nil
 }
 
 // GetSelectSQLByKVWithArgs 生成参数化的KV查询语句
 func (m *MessageTable) GetSelectSQLByKVWithArgs(whereKey, whereVal string) (*SqlWithArgs, error) {
 	if _, ok := m.fieldNameToDesc[whereKey]; !ok {
-		return nil, fmt.Errorf("%w: %s", ErrFieldNotFound, whereKey)
+		return nil, fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, whereKey, m.tableName)
 	}
 	sql := fmt.Sprintf("%s WHERE %s = ?;", m.selectFieldsSQL, escapeMySQLName(whereKey))
 	return &SqlWithArgs{Sql: sql, Args: []interface{}{whereVal}}, nil
@@ -874,7 +939,7 @@ func (m *MessageTable) GetDeleteSQLByWhereWithArgs(whereClause string, whereArgs
 	return &SqlWithArgs{Sql: sql, Args: whereArgs}
 }
 
-// Delete 执行参数化的按主键删除操作
+// Delete 执行参数化的按主键删除操作（直接用DB，无Tx）
 func (p *PbMysqlDB) Delete(message proto.Message) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
@@ -884,15 +949,14 @@ func (p *PbMysqlDB) Delete(message proto.Message) error {
 
 	sqlWithArgs, err := table.GetDeleteSQLWithArgs(message)
 	if sqlWithArgs == nil || err != nil {
-		return fmt.Errorf("generate delete SQL: %w", err)
+		return fmt.Errorf("generate delete SQL for table %s: %w", tableName, err)
 	}
 
 	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
-		return fmt.Errorf("exec delete: sql=%s, args=%v, err=%w",
-			sqlWithArgs.Sql, sqlWithArgs.Args, err)
+		return fmt.Errorf("exec delete for table %s: sql=%s, args=%v, err=%w",
+			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
 	}
-
 	return nil
 }
 
@@ -961,7 +1025,7 @@ func (m *MessageTable) GetUpdateSQLWithArgs(message proto.Message) (*SqlWithArgs
 	for _, primaryKey := range m.primaryKey {
 		field, ok := m.fieldNameToDesc[primaryKey]
 		if !ok {
-			return nil, fmt.Errorf("%w: primary key %s", ErrFieldNotFound, primaryKey)
+			return nil, fmt.Errorf("%w: primary key %s in table %s", ErrFieldNotFound, primaryKey, m.tableName)
 		}
 
 		val, err := SerializeFieldAsString(message, field)
@@ -1005,7 +1069,7 @@ func (m *MessageTable) GetUpdateSQLByWhereWithArgs(message proto.Message, whereC
 	return &SqlWithArgs{Sql: fullSQL, Args: fullArgs}, nil
 }
 
-// Update 执行参数化的按主键更新操作
+// Update 执行参数化的按主键更新操作（直接用DB，无Tx）
 func (p *PbMysqlDB) Update(message proto.Message) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
@@ -1015,22 +1079,20 @@ func (p *PbMysqlDB) Update(message proto.Message) error {
 
 	sqlWithArgs, err := table.GetUpdateSQLWithArgs(message)
 	if sqlWithArgs == nil || err != nil {
-		return fmt.Errorf("generate update SQL: %w", err)
+		return fmt.Errorf("generate update SQL for table %s: %w", tableName, err)
 	}
 
 	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
-		return fmt.Errorf("exec update: sql=%s, args=%v, err=%w",
-			sqlWithArgs.Sql, sqlWithArgs.Args, err)
+		return fmt.Errorf("exec update for table %s: sql=%s, args=%v, err=%w",
+			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
 	}
-
 	return nil
 }
 
 // Init 初始化MessageTable的SQL片段
 func (m *MessageTable) Init() {
 	m.fieldNameToDesc = make(map[string]protoreflect.FieldDescriptor)
-	m.fieldComments = make(map[string]string)
 
 	needComma := false
 	desc := m.Descriptor
@@ -1038,11 +1100,6 @@ func (m *MessageTable) Init() {
 		field := desc.Fields().Get(i)
 		fieldName := string(field.Name())
 		m.fieldNameToDesc[fieldName] = field
-
-		// 修正：通过FieldDescriptor.Comment()方法获取字段注释
-		if comment := field.Comment(); comment != "" {
-			m.fieldComments[fieldName] = comment
-		}
 
 		if needComma {
 			m.fieldsListSQL += ", "
@@ -1104,7 +1161,7 @@ func (p *PbMysqlDB) GetCreateTableSQL(message proto.Message) string {
 	return table.GetCreateTableSQL()
 }
 
-// Save 执行参数化的REPLACE操作
+// Save 执行参数化的REPLACE操作（直接用DB，无Tx）
 func (p *PbMysqlDB) Save(message proto.Message) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
@@ -1114,15 +1171,14 @@ func (p *PbMysqlDB) Save(message proto.Message) error {
 
 	sqlWithArgs, err := table.GetReplaceSQLWithArgs(message)
 	if sqlWithArgs == nil || err != nil {
-		return fmt.Errorf("generate replace SQL: %w", err)
+		return fmt.Errorf("generate replace SQL for table %s: %w", tableName, err)
 	}
 
 	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
-		return fmt.Errorf("exec replace: sql=%s, args=%v, err=%w",
-			sqlWithArgs.Sql, sqlWithArgs.Args, err)
+		return fmt.Errorf("exec replace for table %s: sql=%s, args=%v, err=%w",
+			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
 	}
-
 	return nil
 }
 
@@ -1142,13 +1198,13 @@ func (p *PbMysqlDB) FindOneByWhereWithArgs(message proto.Message, whereClause st
 	sqlWithArgs := table.GetSelectSQLByWhereWithArgs(whereClause, whereArgs)
 	rows, err := p.DB.Query(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
-		return fmt.Errorf("exec select: %w", err)
+		return fmt.Errorf("exec select for table %s: %w", tableName, err)
 	}
 	defer rows.Close()
 
 	columns, err := rows.Columns()
 	if err != nil {
-		return fmt.Errorf("get columns: %w", err)
+		return fmt.Errorf("get columns for table %s: %w", tableName, err)
 	}
 
 	columnValues := make([][]byte, len(columns))
@@ -1160,10 +1216,10 @@ func (p *PbMysqlDB) FindOneByWhereWithArgs(message proto.Message, whereClause st
 	found := false
 	for rows.Next() {
 		if found {
-			return errors.New("multiple rows found")
+			return ErrMultipleRowsFound
 		}
 		if err := rows.Scan(scans...); err != nil {
-			return fmt.Errorf("scan row: %w", err)
+			return fmt.Errorf("scan row for table %s: %w", tableName, err)
 		}
 
 		result := make([]string, len(columns))
@@ -1172,16 +1228,16 @@ func (p *PbMysqlDB) FindOneByWhereWithArgs(message proto.Message, whereClause st
 		}
 
 		if err := ParseFromString(message, result); err != nil {
-			return fmt.Errorf("parse row: %w", err)
+			return fmt.Errorf("parse row for table %s: %w", tableName, err)
 		}
 		found = true
 	}
 
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error: %w", err)
+		return fmt.Errorf("rows error for table %s: %w", tableName, err)
 	}
 	if !found {
-		return errors.New("no row found")
+		return ErrNoRowsFound
 	}
 
 	return nil
@@ -1221,13 +1277,13 @@ func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause st
 	sqlWithArgs := table.GetSelectSQLByWhereWithArgs(whereClause, whereArgs)
 	rows, err := p.DB.Query(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
-		return fmt.Errorf("exec select all: %w", err)
+		return fmt.Errorf("exec select all for table %s: %w", tableName, err)
 	}
 	defer rows.Close()
 
 	columns, err := rows.Columns()
 	if err != nil {
-		return fmt.Errorf("get columns: %w", err)
+		return fmt.Errorf("get columns for table %s: %w", tableName, err)
 	}
 
 	columnValues := make([][]byte, len(columns))
@@ -1241,7 +1297,7 @@ func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause st
 
 	for rows.Next() {
 		if err := rows.Scan(scans...); err != nil {
-			return fmt.Errorf("scan row: %w", err)
+			return fmt.Errorf("scan row for table %s: %w", tableName, err)
 		}
 
 		result := make([]string, len(columns))
@@ -1251,13 +1307,13 @@ func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause st
 
 		listElement := listValue.NewElement()
 		if err := ParseFromString(listElement.Message().Interface(), result); err != nil {
-			return fmt.Errorf("parse row: %w", err)
+			return fmt.Errorf("parse row for table %s: %w", tableName, err)
 		}
 		listValue.Append(listElement)
 	}
 
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error: %w", err)
+		return fmt.Errorf("rows error for table %s: %w", tableName, err)
 	}
 
 	return nil
@@ -1274,13 +1330,13 @@ func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause stri
 	sqlStmt := table.GetSelectSQL(false) + whereClause + ";"
 	rows, err := p.DB.Query(sqlStmt)
 	if err != nil {
-		return fmt.Errorf("exec select: %w, SQL: %s", err, sqlStmt)
+		return fmt.Errorf("exec select for table %s: %w, SQL: %s", tableName, err, sqlStmt)
 	}
 	defer rows.Close()
 
 	columns, err := rows.Columns()
 	if err != nil {
-		return fmt.Errorf("get columns: %w", err)
+		return fmt.Errorf("get columns for table %s: %w", tableName, err)
 	}
 
 	columnValues := make([][]byte, len(columns))
@@ -1292,10 +1348,10 @@ func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause stri
 	found := false
 	for rows.Next() {
 		if found {
-			return errors.New("multiple rows found")
+			return ErrMultipleRowsFound
 		}
 		if err := rows.Scan(scans...); err != nil {
-			return fmt.Errorf("scan row: %w", err)
+			return fmt.Errorf("scan row for table %s: %w", tableName, err)
 		}
 
 		result := make([]string, len(columns))
@@ -1304,16 +1360,16 @@ func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause stri
 		}
 
 		if err := ParseFromString(message, result); err != nil {
-			return fmt.Errorf("parse row: %w", err)
+			return fmt.Errorf("parse row for table %s: %w", tableName, err)
 		}
 		found = true
 	}
 
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error: %w", err)
+		return fmt.Errorf("rows error for table %s: %w", tableName, err)
 	}
 	if !found {
-		return errors.New("no row found")
+		return ErrNoRowsFound
 	}
 
 	return nil
@@ -1348,13 +1404,13 @@ func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause stri
 	sqlStmt := table.GetSelectSQL(false) + whereClause + ";"
 	rows, err := p.DB.Query(sqlStmt)
 	if err != nil {
-		return fmt.Errorf("exec select all: %w, SQL: %s", err, sqlStmt)
+		return fmt.Errorf("exec select all for table %s: %w, SQL: %s", tableName, err, sqlStmt)
 	}
 	defer rows.Close()
 
 	columns, err := rows.Columns()
 	if err != nil {
-		return fmt.Errorf("get columns: %w", err)
+		return fmt.Errorf("get columns for table %s: %w", tableName, err)
 	}
 
 	columnValues := make([][]byte, len(columns))
@@ -1368,7 +1424,7 @@ func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause stri
 
 	for rows.Next() {
 		if err := rows.Scan(scans...); err != nil {
-			return fmt.Errorf("scan row: %w", err)
+			return fmt.Errorf("scan row for table %s: %w", tableName, err)
 		}
 
 		result := make([]string, len(columns))
@@ -1378,13 +1434,13 @@ func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause stri
 
 		listElement := listValue.NewElement()
 		if err := ParseFromString(listElement.Message().Interface(), result); err != nil {
-			return fmt.Errorf("parse row: %w", err)
+			return fmt.Errorf("parse row for table %s: %w", tableName, err)
 		}
 		listValue.Append(listElement)
 	}
 
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error: %w", err)
+		return fmt.Errorf("rows error for table %s: %w", tableName, err)
 	}
 
 	return nil
