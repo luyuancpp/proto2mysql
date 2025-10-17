@@ -705,14 +705,17 @@ func (p *PbMysqlDB) InsertOnDupUpdate(message proto.Message) error {
 	return nil
 }
 
-func (m *MessageTable) GetSelectSqlByKVWhereStmt(whereType, whereVal string) string {
-	stmt := m.getSelectFieldsFromTableSqlStmt()
-	stmt += " WHERE "
-	stmt += whereType
-	stmt += " = '"
-	stmt += whereVal
-	stmt += "';"
-	return stmt
+// 改造后：返回参数化的SELECT SQL（按KV查询）
+func (m *MessageTable) GetSelectSqlByKVWhereWithArgs(whereType, whereVal string) *SqlWithArgs {
+	sql := fmt.Sprintf(
+		"%s WHERE %s = ?;",
+		m.getSelectFieldsFromTableSqlStmt(),
+		whereType,
+	)
+	return &SqlWithArgs{
+		Sql:  sql,
+		Args: []interface{}{whereVal},
+	}
 }
 
 // 获取添加字段的 SQL 语句
@@ -754,24 +757,53 @@ func (m *MessageTable) GetSelectSqlWithWhereClause(whereClause string) string {
 	return stmt
 }
 
-func (m *MessageTable) GetDeleteSql(message proto.Message, db *sql.DB) string {
-	stmt := "DELETE  FROM "
-	stmt += m.tableName
-	stmt += " WHERE "
-	stmt += string(m.Descriptor.Fields().Get(kPrimaryKeyIndex).Name())
-	value := SerializeFieldAsString(message, m.primaryKeyField)
-	stmt += " = '"
-	stmt += value
-	stmt += "'"
-	return stmt
+// 改造后：返回参数化的DELETE SQL（按主键删除）
+func (m *MessageTable) GetDeleteSqlWithArgs(message proto.Message) *SqlWithArgs {
+	primaryKeyName := string(m.Descriptor.Fields().Get(kPrimaryKeyIndex).Name())
+	primaryKeyValue := SerializeFieldAsString(message, m.primaryKeyField)
+
+	sql := fmt.Sprintf(
+		"DELETE FROM %s WHERE %s = ?",
+		m.tableName,
+		primaryKeyName,
+	)
+	return &SqlWithArgs{
+		Sql:  sql,
+		Args: []interface{}{primaryKeyValue},
+	}
 }
 
-func (m *MessageTable) GetDeleteSqlWithWhereClause(whereClause string) string {
-	stmt := "DELETE FROM "
-	stmt += m.tableName
-	stmt += " WHERE "
-	stmt += whereClause
-	return stmt
+// 改造后：返回参数化的DELETE SQL（自定义WHERE子句）
+func (m *MessageTable) GetDeleteSqlWithWhereArgs(whereClause string, whereArgs []interface{}) *SqlWithArgs {
+	sql := fmt.Sprintf(
+		"DELETE FROM %s WHERE %s",
+		m.tableName,
+		whereClause, // 含?占位符
+	)
+	return &SqlWithArgs{
+		Sql:  sql,
+		Args: whereArgs,
+	}
+}
+
+// 新增：执行参数化的DELETE操作
+func (p *PbMysqlDB) Delete(message proto.Message) error {
+	table, ok := p.Tables[GetTableName(message)]
+	if !ok {
+		return fmt.Errorf("table not found: %s", GetTableName(message))
+	}
+
+	sqlWithArgs := table.GetDeleteSqlWithArgs(message)
+	if sqlWithArgs == nil {
+		return fmt.Errorf("failed to generate delete SQL")
+	}
+
+	_, err := p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	if err != nil {
+		return fmt.Errorf("exec delete SQL failed: sql=%s, args=%v, err=%v",
+			sqlWithArgs.Sql, sqlWithArgs.Args, err)
+	}
+	return nil
 }
 
 func (m *MessageTable) GetReplaceIntoSql(message proto.Message) *SqlWithArgs {
@@ -921,29 +953,28 @@ func (m *MessageTable) Init() {
 	m.insertSQL = "INSERT INTO " + m.tableName + " (" + m.getFieldsSqlStmt() + ") VALUES "
 }
 
-func (m *MessageTable) GetUpdateSqlWithWhereClause(message proto.Message, whereClause string) string {
-	sql := "UPDATE " + m.tableName
-	needComma := false
-	sql += " SET "
-	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
-		if needComma {
-			sql += ", "
-		} else {
-			needComma = true
-		}
-		sql += " " + string(m.Descriptor.Fields().Get(i).Name())
-		fieldDesc := m.Descriptor.Fields().Get(i)
-		value := SerializeFieldAsString(message, fieldDesc)
-		sql += "="
-		sql += "'" + value + "'"
+// 改造后：返回参数化的UPDATE SQL（自定义WHERE子句）
+func (m *MessageTable) GetUpdateSqlWithWhereArgs(message proto.Message, whereClause string, whereArgs []interface{}) *SqlWithArgs {
+	// 1. 生成参数化的SET子句（复用已有逻辑）
+	setClause, setArgs := m.GetUpdateSetWithArgs(message)
+	if setClause == "" {
+		return nil
 	}
-	if whereClause != "" {
-		sql += " WHERE "
-		sql += whereClause
-	} else {
-		sql = ""
+
+	// 2. 拼接带占位符的完整SQL
+	sql := fmt.Sprintf(
+		"UPDATE %s SET %s WHERE %s",
+		m.tableName,
+		setClause,
+		whereClause, // 此处whereClause含?占位符（如 "group_id=? AND name=?"）
+	)
+
+	// 3. 合并SET参数和WHERE参数
+	fullArgs := append(setArgs, whereArgs...)
+	return &SqlWithArgs{
+		Sql:  sql,
+		Args: fullArgs,
 	}
-	return sql
 }
 
 func NewPbMysqlDB() *PbMysqlDB {
@@ -1096,10 +1127,18 @@ func (p *PbMysqlDB) FindOneByKV(message proto.Message, whereType string, whereVa
 	if !ok {
 		return fmt.Errorf("table not found")
 	}
-	rows, err := p.DB.Query(table.GetSelectSqlByKVWhereStmt(whereType, whereValue))
+
+	// 调用参数化方法获取SQL和参数
+	sqlWithArgs := table.GetSelectSqlByKVWhereWithArgs(whereType, whereValue)
+	rows, err := p.DB.Query(sqlWithArgs.Sql, sqlWithArgs.Args...) // 传递args
+	if err != nil {
+		return fmt.Errorf("exec select SQL failed: %w", err)
+	}
+	defer rows.Close() // 补充defer关闭rows，避免资源泄漏
 	if err != nil {
 		return err
 	}
+
 	columns, err := rows.Columns()
 	if err != nil {
 		return err
