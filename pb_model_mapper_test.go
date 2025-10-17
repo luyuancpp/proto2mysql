@@ -9,6 +9,7 @@ import (
 	"google.golang.org/protobuf/proto"
 	"log"
 	"os"
+	"strconv"
 	"testing"
 )
 
@@ -312,5 +313,157 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 		fmt.Println(pbSaveList.String())
 		fmt.Println(pbLoadList.String())
 		log.Fatal("pb not equal")
+	}
+}
+
+// TestSpecialCharacterEscape 测试特殊字符的转义与还原是否正确
+func TestSpecialCharacterEscape(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	pbMySqlDB.RegisterTable(&dbprotooption.GolangTest{})
+
+	mysqlConfig := GetMysqlConfig()
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	db := sql.OpenDB(conn)
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
+
+	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	if err != nil {
+		t.Fatalf("无法打开数据库: %v", err)
+	}
+
+	// 准备包含各种需要转义的特殊字符的测试数据
+	specialChars := "!@#$%^&*()_+{}[]|\\:;\"'<>,.?/`~= \t\n\r\v\f"
+	testID := 1001 // 使用独特ID避免与其他测试冲突
+
+	// 保存测试数据
+	pbSave := &dbprotooption.GolangTest{
+		Id:      uint32(testID),
+		GroupId: 100,
+		Ip:      "192.168.1.1",
+		Port:    3306,
+		Player: &dbprotooption.Player{
+			PlayerId: uint64(testID),
+			Name:     "SpecialCharsTest: " + specialChars,
+		},
+	}
+
+	err = pbMySqlDB.Save(pbSave)
+	if err != nil {
+		t.Fatalf("保存包含特殊字符的数据失败: %v", err)
+	}
+
+	// 从数据库读取数据
+	pbLoad := &dbprotooption.GolangTest{}
+	err = pbMySqlDB.LoadOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10))
+	if err != nil {
+		t.Fatalf("读取包含特殊字符的数据失败: %v", err)
+	}
+
+	// 验证数据一致性
+	if !proto.Equal(pbSave, pbLoad) {
+		t.Error("保存和读取的特殊字符数据不一致")
+		t.Logf("预期: %s", pbSave.Player.Name)
+		t.Logf("实际: %s", pbLoad.Player.Name)
+	}
+}
+
+// TestStringWithSpaces 测试包含空格的字符串处理是否正确
+func TestStringWithSpaces(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	pbMySqlDB.RegisterTable(&dbprotooption.GolangTest{})
+
+	mysqlConfig := GetMysqlConfig()
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		log.Fatal(err)
+	}
+	db := sql.OpenDB(conn)
+	defer func(db *sql.DB) {
+		err := db.Close()
+		if err != nil {
+			log.Fatal(err)
+		}
+	}(db)
+
+	err = pbMySqlDB.OpenDB(db, mysqlConfig.DBName)
+	if err != nil {
+		t.Fatalf("无法打开数据库: %v", err)
+	}
+
+	// 准备包含各种空格的测试数据
+	testCases := []struct {
+		id       int32
+		name     string
+		expected string
+	}{
+		{
+			id:       2001,
+			name:     "Single space between words",
+			expected: "Single space between words",
+		},
+		{
+			id:       2002,
+			name:     "  Double  spaces  between  words  ",
+			expected: "  Double  spaces  between  words  ",
+		},
+		{
+			id:       2003,
+			name:     "Leading space",
+			expected: "Leading space",
+		},
+		{
+			id:       2004,
+			name:     "Trailing space ",
+			expected: "Trailing space ",
+		},
+		{
+			id:       2005,
+			name:     "Mixed\tspaces\nand\vother\fwhitespace",
+			expected: "Mixed\tspaces\nand\vother\fwhitespace",
+		},
+	}
+
+	// 保存所有测试数据
+	for _, tc := range testCases {
+		pbSave := &dbprotooption.GolangTest{
+			Id:      uint32(tc.id),
+			GroupId: 200,
+			Ip:      "192.168.2.1",
+			Port:    3306,
+			Player: &dbprotooption.Player{
+				PlayerId: uint64(tc.id),
+				Name:     tc.name,
+			},
+		}
+
+		err = pbMySqlDB.Save(pbSave)
+		if err != nil {
+			t.Errorf("保存ID为%d的空格测试数据失败: %v", tc.id, err)
+			continue
+		}
+	}
+
+	// 验证所有测试数据
+	for _, tc := range testCases {
+		pbLoad := &dbprotooption.GolangTest{}
+		err = pbMySqlDB.LoadOneByKV(pbLoad, "id", strconv.FormatUint(uint64(tc.id), 10))
+		if err != nil {
+			t.Errorf("读取ID为%d的空格测试数据失败: %v", tc.id, err)
+			continue
+		}
+
+		if pbLoad.Player.Name != tc.expected {
+			t.Errorf("ID为%d的空格处理不一致", tc.id)
+			t.Logf("预期: '%s' (长度: %d)", tc.expected, len(tc.expected))
+			t.Logf("实际: '%s' (长度: %d)", pbLoad.Player.Name, len(pbLoad.Player.Name))
+		}
 	}
 }
