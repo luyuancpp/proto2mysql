@@ -152,18 +152,25 @@ func (p *PbMysqlDB) OpenDB(db *sql.DB, dbname string) error {
 func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor) (string, error) {
 	reflection := message.ProtoReflect()
 
-	// 特殊处理Timestamp类型
-	if fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
+	// 特殊处理 Timestamp 类型（先检查是否为消息类型，避免空指针）
+	if fieldDesc.Kind() == protoreflect.MessageKind && fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
 		if !reflection.Has(fieldDesc) {
 			return "", nil
 		}
+		// 直接获取消息值，避免通过 Bytes 反序列化（更高效）
+		subMsg := reflection.Get(fieldDesc).Message()
 		ts := &timestamppb.Timestamp{}
-		if err := proto.Unmarshal(reflection.Get(fieldDesc).Bytes(), ts); err != nil {
+		if err := proto.UnmarshalOptions{Merge: true}.Unmarshal(subMsg.Interface().ProtoReflect().Marshal(), ts); err != nil {
 			return "", fmt.Errorf("serialize timestamp field %s: %w", fieldDesc.Name(), err)
+		}
+		// 处理零值 Timestamp（避免返回 0001-01-01 等不合理时间）
+		if ts.AsTime().IsZero() {
+			return "", nil
 		}
 		return ts.AsTime().Format("2006-01-02 15:04:05"), nil
 	}
 
+	// 处理 map 类型
 	if fieldDesc.IsMap() {
 		if !reflection.Has(fieldDesc) {
 			return "", nil
@@ -176,6 +183,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		return string(data), nil
 	}
 
+	// 处理 list 类型
 	if fieldDesc.IsList() {
 		if !reflection.Has(fieldDesc) {
 			return "", nil
@@ -188,6 +196,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		return string(data), nil
 	}
 
+	// 处理基本类型
 	switch fieldDesc.Kind() {
 	case protoreflect.Int32Kind:
 		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Int()), nil
@@ -198,14 +207,17 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 	case protoreflect.StringKind:
 		return reflection.Get(fieldDesc).String(), nil
 	case protoreflect.Int64Kind:
-		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Int()), nil
+		// 使用 strconv.FormatInt 确保 int64 正确格式化
+		return strconv.FormatInt(reflection.Get(fieldDesc).Int(), 10), nil
 	case protoreflect.Uint64Kind:
-		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint()), nil
+		// 关键修复：使用 strconv.FormatUint 避免无符号数被解析为负数
+		return strconv.FormatUint(reflection.Get(fieldDesc).Uint(), 10), nil
 	case protoreflect.DoubleKind:
 		return fmt.Sprintf("%g", reflection.Get(fieldDesc).Float()), nil
 	case protoreflect.BoolKind:
 		return fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool()), nil
 	case protoreflect.EnumKind:
+		// 建议同时返回枚举的字符串值（如果需要可读性），这里保持原逻辑
 		return fmt.Sprintf("%d", int32(reflection.Get(fieldDesc).Enum())), nil
 	case protoreflect.BytesKind:
 		return string(reflection.Get(fieldDesc).Bytes()), nil
