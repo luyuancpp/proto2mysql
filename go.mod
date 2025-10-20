@@ -1,4 +1,4 @@
-module github.com/luyuancpp/proto2mysql
+module github.com/luyuancpp/proto2mysql-go
 
 go 1.24.5
 
