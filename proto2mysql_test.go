@@ -1301,6 +1301,7 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 			PlayerId: 10004,
 			Name:     "Test3Extra",
 		},
+		PlayerId: 10004,
 	}
 
 	// 3. 注册表并创建表结构
@@ -1367,8 +1368,8 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 			WhereArgs:   []interface{}{testData2.Id, testData2.Port},
 		},
 		{
-			Message:     &dbprotooption.GolangTest3{},            // 新增表3
-			WhereClause: "id = ? AND extra_player.player_id = ?", // 查询新增嵌套字段
+			Message:     &dbprotooption.GolangTest3{}, // 新增表3
+			WhereClause: "id = ? AND player_id = ?",   // 查询新增嵌套字段
 			WhereArgs:   []interface{}{testData3.Id, testData3.ExtraPlayer.PlayerId},
 		},
 	}

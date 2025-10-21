@@ -1496,7 +1496,6 @@ type MultiQuery struct {
 }
 
 // FindMultiByWhereClauses 一次查询多张无关表，返回多个结果
-// FindMultiByWhereClauses 一次查询多张无关表，返回多个结果
 func (p *PbMysqlDB) FindMultiByWhereClauses(queries []MultiQuery) error {
 	if len(queries) == 0 {
 		return errors.New("no queries provided")
