@@ -1291,33 +1291,78 @@ func getMessageFields(msg proto.Message) []protoreflect.FieldDescriptor {
 	return result
 }
 
-// FindMultiByWhereWithArgs 执行带参数的批量查询（核心修复）
-func (db *PbMysqlDB) FindMultiByWhereWithArgs(list proto.Message, whereClause string, args []interface{}) error {
-	// 获取表名和反射信息
-	tableName := GetTableName(list)
-	fields := getMessageFields(list) // 获取消息字段列表
-
-	// 构建查询字段（使用反射获取所有字段名）
-	var fieldNames []string
-	for _, field := range fields {
-		fieldNames = append(fieldNames, escapeMySQLName(string(field.Name())))
+// GetElementTableName 从包含repeated字段的列表消息中，获取其元素类型对应的表名
+// 例如：对于 message golang_test_list { repeated golang_test test_list = 1; }
+// 会返回 "golang_test"
+func GetElementTableName(list proto.Message) (string, error) {
+	if list == nil {
+		return "", errors.New("list message cannot be nil")
 	}
-	queryFields := strings.Join(fieldNames, ", ")
 
-	// 构建完整SQL（严格使用占位符，不拼接任何用户输入）
+	// 获取列表消息的反射对象
+	listReflect := list.ProtoReflect()
+	listDesc := listReflect.Descriptor()
+
+	// 查找唯一的repeated字段
+	var elementField protoreflect.FieldDescriptor
+	fields := listDesc.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if fd.IsList() { // 找到repeated字段
+			if elementField != nil {
+				// 存在多个repeated字段，无法确定目标元素类型
+				return "", ErrMultipleRepeated
+			}
+			elementField = fd
+		}
+	}
+
+	// 检查是否找到repeated字段
+	if elementField == nil {
+		return "", ErrNoRepeatedField
+	}
+
+	// 获取repeated字段的元素类型（必须是message类型）
+	elementDesc := elementField.Message()
+	if elementDesc == nil {
+		return "", fmt.Errorf("repeated field %s is not a message type", elementField.Name())
+	}
+
+	// 返回元素类型对应的表名（即元素message的名称）
+	return string(elementDesc.Name()), nil
+}
+
+// FindMultiByWhereWithArgs 执行带参数的批量查询（使用封装的表名获取函数）
+func (db *PbMysqlDB) FindMultiByWhereWithArgs(list proto.Message, whereClause string, args []interface{}) error {
+	// 1. 通过工具函数获取元素类型对应的表名
+	tableName, err := GetElementTableName(list)
+	if err != nil {
+		return fmt.Errorf("failed to get element table name: %w", err)
+	}
+
+	// 2. 验证表是否已注册
+	table, ok := db.Tables[tableName]
+	if !ok {
+		return fmt.Errorf("%w: %s (element type table)", ErrTableNotFound, tableName)
+	}
+
+	// 3. 构建查询字段（使用表定义的字段列表）
+	queryFields := table.fieldsListSQL
+
+	// 4. 构建完整SQL（严格使用占位符）
 	sql := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
 		queryFields,
 		escapeMySQLName(tableName),
-		whereClause) // whereClause应为"player_id = ? AND group_id = ?"格式
+		whereClause)
 
-	// 执行参数化查询（关键：args直接传递给Query，不做字符串转换）
+	// 5. 执行参数化查询
 	rows, err := db.DB.Query(sql, args...)
 	if err != nil {
-		return fmt.Errorf("查询失败: %v, SQL: %s", err, sql)
+		return fmt.Errorf("query failed: %v, SQL: %s", err, sql)
 	}
 	defer rows.Close()
 
-	// 解析结果到list（省略反射解析逻辑，保持原有）
+	// 6. 解析结果到list
 	return db.scanRowsToList(rows, list)
 }
 
