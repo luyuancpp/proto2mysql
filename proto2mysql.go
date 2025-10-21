@@ -1441,6 +1441,184 @@ func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause stri
 	return nil
 }
 
+
+// FindMultiByKV 通过键值对查询多条结果（简化版，自动拼接 "whereKey = ?" 条件）
+// 注意：message 需是包含 repeated 字段的列表消息（如 golang_test_list）
+func (p *PbMysqlDB) FindMultiByKV(message proto.Message, whereKey string, whereVal interface{}) error {
+	// 直接复用 FindMultiByWhereWithArgs，自动拼接条件 "whereKey = ?"
+	return p.FindMultiByWhereWithArgs(message, whereKey+" = ?", []interface{}{whereVal})
+}
+
+// FindMultiByWhereWithArgs 执行参数化的自定义WHERE查询（返回多条结果）
+// 注意：message 需是一个包含 repeated 字段的“列表消息”（如 golang_test_list）
+// 示例：传入 &golang_test_list{}，结果会填充到其 test_list 字段中
+func (p *PbMysqlDB) FindMultiByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+	// 1. 解析列表消息中的 repeated 字段（用于存储多条结果）
+	reflectionParent := message.ProtoReflect()
+	md := reflectionParent.Descriptor()
+	fieldDescriptors := md.Fields()
+
+	var listField protoreflect.FieldDescriptor
+	for i := 0; i < fieldDescriptors.Len(); i++ {
+		fd := fieldDescriptors.Get(i)
+		if fd.IsList() {
+			if listField != nil {
+				return ErrMultipleRepeated // 不允许多个repeated字段
+			}
+			listField = fd
+		}
+	}
+	if listField == nil {
+		return ErrNoRepeatedField // 必须包含repeated字段
+	}
+
+	// 2. 获取对应的表名（repeated字段的元素类型即表对应的消息类型）
+	elementType := listField.Message() // repeated字段的元素类型（如 golang_test）
+	tableName := string(elementType.Name())
+	table, ok := p.Tables[tableName]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+	}
+
+	// 3. 生成查询SQL并执行
+	sqlWithArgs := table.GetSelectSQLByWhereWithArgs(whereClause, whereArgs)
+	rows, err := p.DB.Query(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	if err != nil {
+		return fmt.Errorf("exec multi select for table %s: %w, SQL: %s", tableName, err, sqlWithArgs.Sql)
+	}
+	defer rows.Close()
+
+	// 4. 获取查询结果的列信息
+	columns, err := rows.Columns()
+	if err != nil {
+		return fmt.Errorf("get columns for table %s: %w", tableName, err)
+	}
+
+	// 5. 准备扫描结果的缓冲区
+	columnValues := make([][]byte, len(columns))
+	scans := make([]interface{}, len(columns))
+	for k := range columnValues {
+		scans[k] = &columnValues[k] // 绑定指针用于扫描
+	}
+
+	// 6. 清空列表并准备接收结果
+	listValue := reflectionParent.Mutable(listField).List()
+	listValue.Truncate(0) // 清空现有数据
+
+	// 7. 遍历结果集并映射到消息
+	for rows.Next() {
+		// 扫描当前行数据
+		if err := rows.Scan(scans...); err != nil {
+			return fmt.Errorf("scan row for table %s: %w", tableName, err)
+		}
+
+		// 转换二进制结果为字符串数组
+		resultRow := make([]string, len(columns))
+		for i, v := range columnValues {
+			resultRow[i] = string(v)
+		}
+
+		// 创建新的元素并解析数据
+		listElement := listValue.NewElement() // 创建repeated字段的元素实例
+		elementMsg := listElement.Message().Interface() // 获取元素的消息接口
+		if err := ParseFromString(elementMsg, resultRow); err != nil {
+			return fmt.Errorf("parse row for table %s: %w", tableName, err)
+		}
+
+		// 添加到列表
+		listValue.Append(listElement)
+	}
+
+	// 8. 检查结果集遍历过程中的错误
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows error for table %s: %w", tableName, err)
+	}
+
+	return nil
+}
+
+// FindMultiByWhereClause 非参数化的自定义条件查询（返回多条结果）
+// 注意：1. message 需是包含 repeated 字段的列表消息（如 golang_test_list）
+//      2. whereClause 是纯条件字符串（如 "player_id = 1000 AND group_id = 10"）
+//      3. 不建议用于有用户输入的场景（有SQL注入风险），仅用于内部固定条件查询
+func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause string) error {
+	// 解析列表消息中的 repeated 字段
+	reflectionParent := message.ProtoReflect()
+	md := reflectionParent.Descriptor()
+	fieldDescriptors := md.Fields()
+
+	var listField protoreflect.FieldDescriptor
+	for i := 0; i < fieldDescriptors.Len(); i++ {
+		fd := fieldDescriptors.Get(i)
+		if fd.IsList() {
+			if listField != nil {
+				return ErrMultipleRepeated
+			}
+			listField = fd
+		}
+	}
+	if listField == nil {
+		return ErrNoRepeatedField
+	}
+
+	// 获取表名（repeated字段的元素类型对应的表）
+	elementType := listField.Message()
+	tableName := string(elementType.Name())
+	table, ok := p.Tables[tableName]
+	if !ok {
+		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+	}
+
+	// 生成非参数化SQL（直接拼接条件）
+	sqlStmt := table.GetSelectSQL(false) + whereClause + ";"
+
+	// 执行查询
+	rows, err := p.DB.Query(sqlStmt)
+	if err != nil {
+		return fmt.Errorf("exec multi select (clause) for table %s: %w, SQL: %s", tableName, err, sqlStmt)
+	}
+	defer rows.Close()
+
+	// 处理结果集（复用解析逻辑）
+	columns, err := rows.Columns()
+	if err != nil {
+		return fmt.Errorf("get columns for table %s: %w", tableName, err)
+	}
+
+	columnValues := make([][]byte, len(columns))
+	scans := make([]interface{}, len(columns))
+	for k := range columnValues {
+		scans[k] = &columnValues[k]
+	}
+
+	listValue := reflectionParent.Mutable(listField).List()
+	listValue.Truncate(0)
+
+	for rows.Next() {
+		if err := rows.Scan(scans...); err != nil {
+			return fmt.Errorf("scan row for table %s: %w", tableName, err)
+		}
+
+		resultRow := make([]string, len(columns))
+		for i, v := range columnValues {
+			resultRow[i] = string(v)
+		}
+
+		listElement := listValue.NewElement()
+		elementMsg := listElement.Message().Interface()
+		if err := ParseFromString(elementMsg, resultRow); err != nil {
+			return fmt.Errorf("parse row for table %s: %w", tableName, err)
+		}
+		listValue.Append(listElement)
+	}
+
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("rows error for table %s: %w", tableName, err)
+	}
+
+	return nil
+}
+
 // FindAllByWhereClause 兼容原有非参数化批量查询
 func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause string) error {
 	reflectionParent := message.ProtoReflect()

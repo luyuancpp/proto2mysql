@@ -4,7 +4,7 @@ go 1.24.5
 
 require (
 	github.com/go-sql-driver/mysql v1.9.3
-	github.com/luyuancpp/dbprotooption v0.0.8
+	github.com/luyuancpp/dbprotooption v0.0.9
 	google.golang.org/protobuf v1.36.10
 )
 

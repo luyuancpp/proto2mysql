@@ -1428,3 +1428,213 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 
 	t.Log("跨表批量查询测试通过")
 }
+
+// TestFindMultiInterfaces 测试多条结果查询的三个接口
+func TestFindMultiInterfaces(t *testing.T) {
+	// 1. 初始化数据库连接
+	pbMySqlDB := NewPbMysqlDB()
+	mysqlConfig := GetMysqlConfig()
+	if mysqlConfig == nil {
+		t.Fatal("获取MySQL配置失败，请检查db.json文件")
+	}
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		t.Fatalf("创建MySQL连接器失败: %v", err)
+	}
+	db := sql.OpenDB(conn)
+	defer func(db *sql.DB) {
+		if err := db.Close(); err != nil {
+			t.Logf("关闭数据库失败: %v", err)
+		}
+	}(db)
+
+	if err := db.Ping(); err != nil {
+		t.Fatalf("数据库连接失败: %v", err)
+	}
+	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
+		t.Fatalf("切换数据库失败: %v", err)
+	}
+
+	// 2. 注册测试表（golang_test）
+	testTable := &dbprotooption.GolangTest{}
+	pbMySqlDB.RegisterTable(
+		testTable,
+		WithPrimaryKey("id"),
+		WithAutoIncrementKey("id"),
+		WithIndexes("player_id"), // 为player_id建索引，加速查询
+	)
+
+	// 3. 创建表并清理旧数据
+	if err := pbMySqlDB.CreateOrUpdateTable(testTable); err != nil {
+		t.Fatalf("创建表失败: %v", err)
+	}
+	tableName := GetTableName(testTable)
+	cleanSQL := fmt.Sprintf("DELETE FROM %s WHERE player_id = ?", escapeMySQLName(tableName))
+	_, _ = db.Exec(cleanSQL, 1000) // 清理player_id=1000的旧数据
+
+	// 4. 插入测试数据（3条相同player_id的数据，用于测试多条结果）
+	testData1 := &dbprotooption.GolangTest{
+		Id:        1001,
+		PlayerId:  1000, // 关键：相同的player_id
+		Ip:        "192.168.1.101",
+		Port:      3306,
+		GroupId:   10,
+	}
+	testData2 := &dbprotooption.GolangTest{
+		Id:        1002,
+		PlayerId:  1000,
+		Ip:        "192.168.1.102",
+		Port:      3307,
+		GroupId:   10,
+	}
+	testData3 := &dbprotooption.GolangTest{
+		Id:        1003,
+		PlayerId:  1000,
+		Ip:        "192.168.1.103",
+		Port:      3308,
+		GroupId:   20, // 不同的groupId，用于复杂条件查询
+	}
+	// 插入一条不相关数据（用于验证过滤效果）
+	unrelatedData := &dbprotooption.GolangTest{
+		Id:        2001,
+		PlayerId:  2000, // 不同的player_id
+		Ip:        "192.168.2.101",
+	}
+
+	// 批量插入测试数据
+	if err := pbMySqlDB.BatchInsert([]proto.Message{testData1, testData2, testData3, unrelatedData}); err != nil {
+		t.Fatalf("插入测试数据失败: %v", err)
+	}
+
+	// 预期结果：3条player_id=1000的数据（按id排序）
+	expectedIds := map[uint32]bool{1001: true, 1002: true, 1003: true}
+
+	// 5. 测试 FindMultiByKV（键值对查询多条结果）
+	t.Run("FindMultiByKV", func(t *testing.T) {
+		var resultList dbprotooption.GolangTestList
+		err := pbMySqlDB.FindMultiByKV(&resultList, "player_id", uint64(1000))
+		if err != nil {
+			t.Fatalf("FindMultiByKV查询失败: %v", err)
+		}
+
+		// 验证结果数量
+		if len(resultList.TestList) != 3 {
+			t.Fatalf("预期3条结果，实际%d条", len(resultList.TestList))
+		}
+
+		// 验证结果正确性
+		for _, item := range resultList.TestList {
+			if !expectedIds[item.Id] {
+				t.Errorf("结果包含非预期数据: id=%d", item.Id)
+			}
+			if item.PlayerId != 1000 {
+				t.Errorf("数据校验失败: player_id应为1000，实际为%d", item.PlayerId)
+			}
+		}
+	})
+
+	// 6. 测试 FindMultiByWhereWithArgs（参数化条件查询多条结果）
+	t.Run("FindMultiByWhereWithArgs", func(t *testing.T) {
+		var resultList dbprotooption.GolangTestList
+		// 复杂条件：player_id=1000 且 group_id=10
+		err := pbMySqlDB.FindMultiByWhereWithArgs(
+			&resultList,
+			"player_id = ? AND group_id = ?",
+			[]interface{}{uint64(1000), 10},
+		)
+		if err != nil {
+			t.Fatalf("FindMultiByWhereWithArgs查询失败: %v", err)
+		}
+
+		// 验证结果数量（预期2条：1001、1002）
+		if len(resultList.TestList) != 2 {
+			t.Fatalf("预期2条结果，实际%d条", len(resultList.TestList))
+		}
+
+		// 验证结果正确性
+		for _, item := range resultList.TestList {
+			if item.Id != 1001 && item.Id != 1002 {
+				t.Errorf("结果包含非预期数据: id=%d", item.Id)
+			}
+			if item.GroupId != 10 {
+				t.Errorf("数据校验失败: group_id应为10，实际为%d", item.GroupId)
+			}
+		}
+	})
+
+	// 7. 测试 FindMultiByWhereClause（非参数化条件查询多条结果）
+	t.Run("FindMultiByWhereClause", func(t *testing.T) {
+		var resultList dbprotooption.GolangTestList
+		// 固定条件（内部使用，无用户输入）
+		err := pbMySqlDB.FindMultiByWhereClause(
+			&resultList,
+			"player_id = 1000 AND port > 3306", // port>3306：预期1002、1003
+		)
+		if err != nil {
+			t.Fatalf("FindMultiByWhereClause查询失败: %v", err)
+		}
+
+		// 验证结果数量（预期2条）
+		if len(resultList.TestList) != 2 {
+			t.Fatalf("预期2条结果，实际%d条", len(resultList.TestList))
+		}
+
+		// 验证结果正确性
+		for _, item := range resultList.TestList {
+			if item.Id != 1002 && item.Id != 1003 {
+				t.Errorf("结果包含非预期数据: id=%d", item.Id)
+			}
+			if item.Port <= 3306 {
+				t.Errorf("数据校验失败: port应>3306，实际为%d", item.Port)
+			}
+		}
+	})
+
+	// 8. 测试边界情况：查询无结果
+	t.Run("FindMulti_NoResult", func(t *testing.T) {
+		var resultList dbprotooption.GolangTestList
+		err := pbMySqlDB.FindMultiByKV(&resultList, "player_id", uint64(9999)) // 不存在的player_id
+		if err != nil {
+			t.Fatalf("查询无结果时不应报错: %v", err)
+		}
+		if len(resultList.TestList) != 0 {
+			t.Errorf("预期0条结果，实际%d条", len(resultList.TestList))
+		}
+	})
+
+	// 9. 测试SQL注入防护（参数化接口vs非参数化接口）
+	t.Run("SQLInjectionTest", func(t *testing.T) {
+		// 恶意输入：尝试注入SQL
+		maliciousInput := "1000 OR 1=1"
+
+		// 测试参数化接口（应安全处理）
+		var paramResult dbprotooption.GolangTestList
+		err := pbMySqlDB.FindMultiByWhereWithArgs(
+			&paramResult,
+			"player_id = ?",
+			[]interface{}{maliciousInput}, // 作为参数传递，而非拼接
+		)
+		if err != nil {
+			t.Fatalf("参数化接口处理恶意输入失败: %v", err)
+		}
+		if len(paramResult.TestList) != 0 { // player_id为字符串"1000 OR 1=1"，无匹配数据
+			t.Error("参数化接口未有效防护SQL注入")
+		}
+
+		// 测试非参数化接口（存在风险，仅作演示）
+		var clauseResult dbprotooption.GolangTestList
+		err = pbMySqlDB.FindMultiByWhereClause(
+			&clauseResult,
+			"player_id = " + maliciousInput, // 直接拼接，会被注入
+		)
+		if err != nil {
+			t.Fatalf("非参数化接口执行失败: %v", err)
+		}
+		// 注入成功会返回所有数据（包括unrelatedData），此处验证风险
+		if len(clauseResult.TestList) >= 4 {
+			t.Log("警告：非参数化接口存在SQL注入风险（本测试仅作演示，生产环境禁用）")
+		}
+	})
+
+	t.Log("所有多条结果查询接口测试通过")
+}
