@@ -576,7 +576,7 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 
 	// 批量查询
 	actualList := &dbprotooption.GolangTestList{}
-	if err := pbMySqlDB.FindAllByWhereClause(actualList, " WHERE group_id=1"); err != nil {
+	if err := pbMySqlDB.FindAllByWhereClause(actualList, "group_id=1"); err != nil {
 		t.Fatalf("批量查询失败: %v", err)
 	}
 
@@ -1267,10 +1267,10 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 	}
 	// 新增表1数据
 	testData1 := &dbprotooption.GolangTest1{
-		Id:        101,
-		GroupId:   1,
-		Ip:        "192.168.0.101",
-		Port:      3306,
+		Id:      101,
+		GroupId: 1,
+		Ip:      "192.168.0.101",
+		Port:    3306,
 		Player: &dbprotooption.Player{
 			PlayerId: 10001,
 			Name:     "Test1",
@@ -1353,22 +1353,22 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 	// 6. 准备批量查询参数（跨4张表）
 	queries := []MultiQuery{
 		{
-			Message:     &dbprotooption.GolangTest{},   // 原始表
+			Message:     &dbprotooption.GolangTest{}, // 原始表
 			WhereClause: "id = ? AND group_id = ?",
 			WhereArgs:   []interface{}{testData.Id, testData.GroupId},
 		},
 		{
-			Message:     &dbprotooption.GolangTest1{},  // 新增表1
-			WhereClause: "id = ? AND extra_info = ?",   // 查询新增字段
+			Message:     &dbprotooption.GolangTest1{}, // 新增表1
+			WhereClause: "id = ? AND extra_info = ?",  // 查询新增字段
 			WhereArgs:   []interface{}{testData1.Id, testData1.ExtraInfo},
 		},
 		{
-			Message:     &dbprotooption.GolangTest2{},  // 新增表2
-			WhereClause: "id = ? AND port = ?",         // 查询uint64字段
+			Message:     &dbprotooption.GolangTest2{}, // 新增表2
+			WhereClause: "id = ? AND port = ?",        // 查询uint64字段
 			WhereArgs:   []interface{}{testData2.Id, testData2.Port},
 		},
 		{
-			Message:     &dbprotooption.GolangTest3{},  // 新增表3
+			Message:     &dbprotooption.GolangTest3{},            // 新增表3
 			WhereClause: "id = ? AND extra_player.player_id = ?", // 查询新增嵌套字段
 			WhereArgs:   []interface{}{testData3.Id, testData3.ExtraPlayer.PlayerId},
 		},
@@ -1474,31 +1474,31 @@ func TestFindMultiInterfaces(t *testing.T) {
 
 	// 4. 插入测试数据（3条相同player_id的数据，用于测试多条结果）
 	testData1 := &dbprotooption.GolangTest{
-		Id:        1001,
-		PlayerId:  1000, // 关键：相同的player_id
-		Ip:        "192.168.1.101",
-		Port:      3306,
-		GroupId:   10,
+		Id:       1001,
+		PlayerId: 1000, // 关键：相同的player_id
+		Ip:       "192.168.1.101",
+		Port:     3306,
+		GroupId:  10,
 	}
 	testData2 := &dbprotooption.GolangTest{
-		Id:        1002,
-		PlayerId:  1000,
-		Ip:        "192.168.1.102",
-		Port:      3307,
-		GroupId:   10,
+		Id:       1002,
+		PlayerId: 1000,
+		Ip:       "192.168.1.102",
+		Port:     3307,
+		GroupId:  10,
 	}
 	testData3 := &dbprotooption.GolangTest{
-		Id:        1003,
-		PlayerId:  1000,
-		Ip:        "192.168.1.103",
-		Port:      3308,
-		GroupId:   20, // 不同的groupId，用于复杂条件查询
+		Id:       1003,
+		PlayerId: 1000,
+		Ip:       "192.168.1.103",
+		Port:     3308,
+		GroupId:  20, // 不同的groupId，用于复杂条件查询
 	}
 	// 插入一条不相关数据（用于验证过滤效果）
 	unrelatedData := &dbprotooption.GolangTest{
-		Id:        2001,
-		PlayerId:  2000, // 不同的player_id
-		Ip:        "192.168.2.101",
+		Id:       2001,
+		PlayerId: 2000, // 不同的player_id
+		Ip:       "192.168.2.101",
 	}
 
 	// 批量插入测试数据
@@ -1625,7 +1625,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 		var clauseResult dbprotooption.GolangTestList
 		err = pbMySqlDB.FindMultiByWhereClause(
 			&clauseResult,
-			"player_id = " + maliciousInput, // 直接拼接，会被注入
+			"player_id = "+maliciousInput, // 直接拼接，会被注入
 		)
 		if err != nil {
 			t.Fatalf("非参数化接口执行失败: %v", err)

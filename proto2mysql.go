@@ -2,20 +2,18 @@ package proto2mysql
 
 import (
 	"database/sql"
-	"encoding/base64"
 	"errors"
 	"fmt"
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/luyuancpp/proto2mysql/pbconv"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/types/known/timestamppb"
 	"log"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
-	"time"
-
-	_ "github.com/go-sql-driver/mysql"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // 常量定义
@@ -34,7 +32,6 @@ var (
 	timestampFullName = t.ProtoReflect().Descriptor().FullName()
 	// 自定义错误类型
 	ErrTableNotFound        = errors.New("table not found")
-	ErrInvalidFieldKind     = errors.New("invalid field kind")
 	ErrNoRepeatedField      = errors.New("message has no repeated field")
 	ErrMultipleRepeated     = errors.New("message has multiple repeated fields")
 	ErrPrimaryKeyNotFound   = errors.New("primary key not found")
@@ -94,6 +91,7 @@ func (m *MessageTable) DefaultInstance() proto.Message {
 }
 
 // getMySQLFieldType 获取字段对应的MySQL目标类型（支持Timestamp特殊处理）
+// getMySQLFieldType 获取字段对应的MySQL目标类型（支持Timestamp特殊处理）
 func (m *MessageTable) getMySQLFieldType(fieldDesc protoreflect.FieldDescriptor) string {
 	// 特殊处理Timestamp类型
 	if fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
@@ -127,6 +125,13 @@ func (m *MessageTable) getMySQLFieldType(fieldDesc protoreflect.FieldDescriptor)
 		}
 	}
 
+	// 处理自增字段：移除默认值（修复Error 1067）
+	if m.autoIncreaseKey == fieldName {
+		// 移除DEFAULT 0（避免自增字段默认值冲突）
+		baseType = strings.ReplaceAll(baseType, " DEFAULT 0", "")
+		baseType += " AUTO_INCREMENT"
+	}
+
 	return baseType
 }
 
@@ -147,286 +152,6 @@ func (p *PbMysqlDB) OpenDB(db *sql.DB, dbname string) error {
 	p.DBName = dbname
 	_, err := p.DB.Exec("USE " + p.DBName)
 	return err
-}
-
-// 序列化字段（完善二进制编码和对称性）
-func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor) (string, error) {
-	reflection := message.ProtoReflect()
-
-	// 特殊处理 Timestamp 类型
-	if fieldDesc.Kind() == protoreflect.MessageKind && fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
-		if !reflection.Has(fieldDesc) {
-			return "", nil
-		}
-		subMsg := reflection.Get(fieldDesc).Message().Interface()
-		ts, ok := subMsg.(*timestamppb.Timestamp)
-		if !ok {
-			return "", fmt.Errorf("field %s is not a Timestamp", fieldDesc.Name())
-		}
-		if ts.AsTime().IsZero() {
-			return "", nil
-		}
-		return ts.AsTime().Format("2006-01-02 15:04:05"), nil
-	}
-
-	// 处理 map 类型（Base64 编码）
-	if fieldDesc.IsMap() {
-		if !reflection.Has(fieldDesc) {
-			return "", nil
-		}
-		mapWrapper := &MapWrapper{MapData: reflection.Get(fieldDesc).Map()}
-		data, err := proto.Marshal(mapWrapper)
-		if err != nil {
-			return "", fmt.Errorf("serialize map field %s: %w", fieldDesc.Name(), err)
-		}
-		return base64.StdEncoding.EncodeToString(data), nil
-	}
-
-	// 处理 list 类型（Base64 编码）
-	if fieldDesc.IsList() {
-		if !reflection.Has(fieldDesc) {
-			return "", nil
-		}
-		listWrapper := &ListWrapper{ListData: reflection.Get(fieldDesc).List()}
-		data, err := proto.Marshal(listWrapper)
-		if err != nil {
-			return "", fmt.Errorf("serialize list field %s: %w", fieldDesc.Name(), err)
-		}
-		return base64.StdEncoding.EncodeToString(data), nil
-	}
-
-	// 处理基本类型
-	switch fieldDesc.Kind() {
-	case protoreflect.Int32Kind:
-		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Int()), nil
-	case protoreflect.Uint32Kind:
-		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint()), nil
-	case protoreflect.FloatKind:
-		val := reflection.Get(fieldDesc).Float()
-		return strconv.FormatFloat(val, 'f', -1, 32), nil
-	case protoreflect.StringKind:
-		return reflection.Get(fieldDesc).String(), nil
-	case protoreflect.Int64Kind:
-		return strconv.FormatInt(reflection.Get(fieldDesc).Int(), 10), nil
-	case protoreflect.Uint64Kind:
-		return strconv.FormatUint(reflection.Get(fieldDesc).Uint(), 10), nil
-	case protoreflect.DoubleKind:
-		val := reflection.Get(fieldDesc).Float()
-		return strconv.FormatFloat(val, 'f', -1, 64), nil
-	case protoreflect.BoolKind:
-		return fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool()), nil
-	case protoreflect.EnumKind:
-		return fmt.Sprintf("%d", int32(reflection.Get(fieldDesc).Enum())), nil
-	case protoreflect.BytesKind:
-		return base64.StdEncoding.EncodeToString(reflection.Get(fieldDesc).Bytes()), nil
-	case protoreflect.MessageKind:
-		if reflection.Has(fieldDesc) {
-			subMsg := reflection.Get(fieldDesc).Message().Interface()
-			data, err := proto.Marshal(subMsg)
-			if err != nil {
-				return "", fmt.Errorf("marshal sub-message field %s: %w", fieldDesc.Name(), err)
-			}
-			return base64.StdEncoding.EncodeToString(data), nil
-		}
-		return "", nil
-	default:
-		return "", fmt.Errorf("%w: %v (field: %s)", ErrInvalidFieldKind, fieldDesc.Kind(), fieldDesc.Name())
-	}
-}
-
-// 反序列化字段（完善二进制解码和时间格式容错）
-func ParseFromString(message proto.Message, row []string) error {
-	reflection := message.ProtoReflect()
-	desc := reflection.Descriptor()
-
-	for i := 0; i < desc.Fields().Len(); i++ {
-		if i >= len(row) {
-			continue
-		}
-
-		fieldDesc := desc.Fields().Get(i)
-		fieldValue := row[i]
-		fieldName := fieldDesc.Name()
-
-		// 特殊处理 Timestamp 类型（支持多格式）
-		if fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
-			if fieldValue == "" {
-				continue
-			}
-			formats := []string{
-				"2006-01-02 15:04:05.999", // 带毫秒
-				"2006-01-02 15:04:05",     // 不带毫秒
-				"2006-01-02",              // 仅日期
-			}
-			var t time.Time
-			var err error
-			for _, format := range formats {
-				t, err = time.Parse(format, fieldValue)
-				if err == nil {
-					break
-				}
-			}
-			if err != nil {
-				return fmt.Errorf("parse timestamp field %s: %w (value: %s)", fieldName, err, fieldValue)
-			}
-			ts := timestamppb.New(t)
-			data, err := proto.Marshal(ts)
-			if err != nil {
-				return fmt.Errorf("marshal timestamp field %s: %w", fieldName, err)
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfBytes(data))
-			continue
-		}
-
-		// 处理 map 类型（Base64 解码）
-		if fieldDesc.IsMap() {
-			if fieldValue == "" {
-				continue
-			}
-			data, err := base64.StdEncoding.DecodeString(fieldValue)
-			if err != nil {
-				return fmt.Errorf("decode map field %s: %w (value: %s)", fieldName, err, fieldValue)
-			}
-			mapWrapper := &MapWrapper{}
-			if err := proto.Unmarshal(data, mapWrapper); err != nil {
-				return fmt.Errorf("parse map field %s: %w (value: %s)", fieldName, err, fieldValue)
-			}
-			mapVal := reflection.Mutable(fieldDesc).Map()
-			mapWrapper.MapData.Range(func(key protoreflect.MapKey, val protoreflect.Value) bool {
-				mapVal.Set(key, val)
-				return true
-			})
-			continue
-		}
-
-		// 处理 list 类型（Base64 解码）
-		if fieldDesc.IsList() {
-			if fieldValue == "" {
-				continue
-			}
-			data, err := base64.StdEncoding.DecodeString(fieldValue)
-			if err != nil {
-				return fmt.Errorf("decode list field %s: %w (value: %s)", fieldName, err, fieldValue)
-			}
-			listWrapper := &ListWrapper{}
-			if err := proto.Unmarshal(data, listWrapper); err != nil {
-				return fmt.Errorf("parse list field %s: %w (value: %s)", fieldName, err, fieldValue)
-			}
-			listVal := reflection.Mutable(fieldDesc).List()
-			for i := 0; i < listWrapper.ListData.Len(); i++ {
-				listVal.Append(listWrapper.ListData.Get(i))
-			}
-			continue
-		}
-
-		// 非集合类型处理
-		if fieldValue == "" {
-			switch fieldDesc.Kind() {
-			case protoreflect.Int32Kind, protoreflect.Int64Kind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfInt64(0))
-			case protoreflect.Uint32Kind, protoreflect.Uint64Kind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfUint64(0))
-			case protoreflect.FloatKind, protoreflect.DoubleKind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfFloat64(0))
-			case protoreflect.BoolKind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfBool(false))
-			case protoreflect.StringKind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfString(""))
-			}
-			continue
-		}
-
-		// 解析非空值
-		switch fieldDesc.Kind() {
-		case protoreflect.Int32Kind:
-			val, err := strconv.ParseInt(row[i], 10, 32)
-			if err != nil {
-				return fmt.Errorf("parse int32 field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfInt32(int32(val)))
-		case protoreflect.Int64Kind:
-			val, err := strconv.ParseInt(row[i], 10, 64)
-			if err != nil {
-				return fmt.Errorf("parse int64 field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfInt64(val))
-		case protoreflect.Uint32Kind:
-			val, err := strconv.ParseUint(row[i], 10, 32)
-			if err != nil {
-				return fmt.Errorf("parse uint32 field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfUint32(uint32(val)))
-		case protoreflect.Uint64Kind:
-			val, err := strconv.ParseUint(row[i], 10, 64)
-			if err != nil {
-				return fmt.Errorf("parse uint64 field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfUint64(val))
-		case protoreflect.FloatKind:
-			val, err := strconv.ParseFloat(row[i], 32)
-			if err != nil {
-				return fmt.Errorf("parse float field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfFloat32(float32(val)))
-		case protoreflect.DoubleKind:
-			val, err := strconv.ParseFloat(row[i], 64)
-			if err != nil {
-				return fmt.Errorf("parse double field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfFloat64(val))
-		case protoreflect.StringKind:
-			reflection.Set(fieldDesc, protoreflect.ValueOfString(row[i]))
-		case protoreflect.BoolKind:
-			val, err := strconv.ParseBool(row[i])
-			if err != nil {
-				return fmt.Errorf("parse bool field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfBool(val))
-		case protoreflect.EnumKind:
-			val, err := strconv.Atoi(row[i])
-			if err != nil {
-				return fmt.Errorf("parse enum field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfEnum(protoreflect.EnumNumber(val)))
-		case protoreflect.BytesKind:
-			data, err := base64.StdEncoding.DecodeString(row[i])
-			if err != nil {
-				return fmt.Errorf("decode bytes field %s: %w", fieldName, err)
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfBytes(data))
-		case protoreflect.MessageKind:
-			data, err := base64.StdEncoding.DecodeString(row[i])
-			if err != nil {
-				return fmt.Errorf("decode sub-message field %s: %w", fieldName, err)
-			}
-			subMsg := reflection.Mutable(fieldDesc).Message()
-			if err := proto.Unmarshal(data, subMsg.Interface()); err != nil {
-				return fmt.Errorf("unmarshal sub-message field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-		default:
-			return fmt.Errorf("%w: %v (field: %s)", ErrInvalidFieldKind, fieldDesc.Kind(), fieldName)
-		}
-	}
-
-	return nil
-}
-
-// MapWrapper 临时包装器：用于序列化map
-type MapWrapper struct {
-	MapData protoreflect.Map
-}
-
-func (m *MapWrapper) ProtoReflect() protoreflect.Message {
-	return protoreflect.Message(nil)
-}
-
-// ListWrapper 临时包装器：用于序列化list
-type ListWrapper struct {
-	ListData protoreflect.List
-}
-
-func (l *ListWrapper) ProtoReflect() protoreflect.Message {
-	return protoreflect.Message(nil)
 }
 
 // MySQLFieldTypes MySQL字段类型映射表
@@ -802,7 +527,7 @@ func (m *MessageTable) GetInsertSQLWithArgs(message proto.Message) (*SqlWithArgs
 	var args []interface{}
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		fieldDesc := m.Descriptor.Fields().Get(i)
-		val, err := SerializeFieldAsString(message, fieldDesc)
+		val, err := pbconv.SerializeFieldAsString(message, fieldDesc)
 		if err != nil {
 			return nil, fmt.Errorf("serialize field %s: %w", fieldDesc.Name(), err)
 		}
@@ -835,7 +560,7 @@ func (m *MessageTable) GetBatchInsertSQLWithArgs(messages []proto.Message) (*Sql
 		args := make([]interface{}, 0, fieldCount)
 		for i := 0; i < fieldCount; i++ {
 			fieldDesc := m.Descriptor.Fields().Get(i)
-			val, err := SerializeFieldAsString(msg, fieldDesc)
+			val, err := pbconv.SerializeFieldAsString(msg, fieldDesc)
 			if err != nil {
 				return nil, fmt.Errorf("serialize field %s: %w", fieldDesc.Name(), err)
 			}
@@ -868,7 +593,7 @@ func (m *MessageTable) GetInsertOnDupUpdateSQLWithArgs(message proto.Message) (*
 		if !reflection.Has(fieldDesc) {
 			continue
 		}
-		val, err := SerializeFieldAsString(message, fieldDesc)
+		val, err := pbconv.SerializeFieldAsString(message, fieldDesc)
 		if err != nil {
 			return nil, fmt.Errorf("serialize update field %s: %w", fieldDesc.Name(), err)
 		}
@@ -899,7 +624,7 @@ func (m *MessageTable) GetInsertOnDupKeyForPrimaryKeyWithArgs(message proto.Mess
 	}
 
 	primaryKeyName := string(m.primaryKeyField.Name())
-	primaryKeyValue, err := SerializeFieldAsString(message, m.primaryKeyField)
+	primaryKeyValue, err := pbconv.SerializeFieldAsString(message, m.primaryKeyField)
 	if err != nil {
 		return nil, fmt.Errorf("serialize primary key: %w", err)
 	}
@@ -1015,7 +740,7 @@ func (m *MessageTable) GetDeleteSQLWithArgs(message proto.Message) (*SqlWithArgs
 	if m.primaryKeyField == nil {
 		return nil, ErrPrimaryKeyNotFound
 	}
-	val, err := SerializeFieldAsString(message, m.primaryKeyField)
+	val, err := pbconv.SerializeFieldAsString(message, m.primaryKeyField)
 	if err != nil {
 		return nil, fmt.Errorf("serialize primary key: %w", err)
 	}
@@ -1057,7 +782,7 @@ func (m *MessageTable) GetReplaceSQLWithArgs(message proto.Message) (*SqlWithArg
 	var args []interface{}
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		fieldDesc := m.Descriptor.Fields().Get(i)
-		val, err := SerializeFieldAsString(message, fieldDesc)
+		val, err := pbconv.SerializeFieldAsString(message, fieldDesc)
 		if err != nil {
 			return nil, fmt.Errorf("serialize field %s: %w", fieldDesc.Name(), err)
 		}
@@ -1082,7 +807,7 @@ func (m *MessageTable) GetUpdateSetWithArgs(message proto.Message) (setClause st
 			continue
 		}
 
-		val, err := SerializeFieldAsString(message, field)
+		val, err := pbconv.SerializeFieldAsString(message, field)
 		if err != nil {
 			return "", nil, fmt.Errorf("serialize update field %s: %w", field.Name(), err)
 		}
@@ -1120,7 +845,7 @@ func (m *MessageTable) GetUpdateSQLWithArgs(message proto.Message) (*SqlWithArgs
 			return nil, fmt.Errorf("%w: primary key %s in table %s", ErrFieldNotFound, primaryKey, m.tableName)
 		}
 
-		val, err := SerializeFieldAsString(message, field)
+		val, err := pbconv.SerializeFieldAsString(message, field)
 		if err != nil {
 			return nil, fmt.Errorf("serialize primary key %s: %w", primaryKey, err)
 		}
@@ -1319,7 +1044,7 @@ func (p *PbMysqlDB) FindOneByWhereWithArgs(message proto.Message, whereClause st
 			result[i] = string(v)
 		}
 
-		if err := ParseFromString(message, result); err != nil {
+		if err := pbconv.ParseFromString(message, result); err != nil {
 			return fmt.Errorf("parse row for table %s: %w", tableName, err)
 		}
 		found = true
@@ -1398,7 +1123,7 @@ func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause st
 		}
 
 		listElement := listValue.NewElement()
-		if err := ParseFromString(listElement.Message().Interface(), result); err != nil {
+		if err := pbconv.ParseFromString(listElement.Message().Interface(), result); err != nil {
 			return fmt.Errorf("parse row for table %s: %w", tableName, err)
 		}
 		listValue.Append(listElement)
@@ -1451,7 +1176,7 @@ func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause stri
 			result[i] = string(v)
 		}
 
-		if err := ParseFromString(message, result); err != nil {
+		if err := pbconv.ParseFromString(message, result); err != nil {
 			return fmt.Errorf("parse row for table %s: %w", tableName, err)
 		}
 		found = true
@@ -1546,7 +1271,7 @@ func (p *PbMysqlDB) FindMultiByWhereWithArgs(message proto.Message, whereClause 
 		// 创建新的元素并解析数据
 		listElement := listValue.NewElement()           // 创建repeated字段的元素实例
 		elementMsg := listElement.Message().Interface() // 获取元素的消息接口
-		if err := ParseFromString(elementMsg, resultRow); err != nil {
+		if err := pbconv.ParseFromString(elementMsg, resultRow); err != nil {
 			return fmt.Errorf("parse row for table %s: %w", tableName, err)
 		}
 
@@ -1562,6 +1287,11 @@ func (p *PbMysqlDB) FindMultiByWhereWithArgs(message proto.Message, whereClause 
 	return nil
 }
 
+// FindMultiByWhereClause 非参数化的自定义条件查询（返回多条结果）
+// 注意：1. message 需是包含 repeated 字段的列表消息（如 golang_test_list）
+//  2. whereClause 是纯条件字符串（如 "player_id = 1000 AND group_id = 10"）
+//  3. 不建议用于有用户输入的场景（有SQL注入风险），仅用于内部固定条件查询
+//
 // FindMultiByWhereClause 非参数化的自定义条件查询（返回多条结果）
 // 注意：1. message 需是包含 repeated 字段的列表消息（如 golang_test_list）
 //  2. whereClause 是纯条件字符串（如 "player_id = 1000 AND group_id = 10"）
@@ -1594,8 +1324,8 @@ func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause st
 		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 	}
 
-	// 生成非参数化SQL（直接拼接条件）
-	sqlStmt := table.GetSelectSQL(false) + whereClause + ";"
+	// 生成非参数化SQL（补充WHERE关键字，修复语法错误）
+	sqlStmt := table.GetSelectSQL(false) + " WHERE " + whereClause + ";"
 
 	// 执行查询
 	rows, err := p.DB.Query(sqlStmt)
@@ -1604,7 +1334,7 @@ func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause st
 	}
 	defer rows.Close()
 
-	// 处理结果集（复用解析逻辑）
+	// 处理结果集
 	columns, err := rows.Columns()
 	if err != nil {
 		return fmt.Errorf("get columns for table %s: %w", tableName, err)
@@ -1631,7 +1361,7 @@ func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause st
 
 		listElement := listValue.NewElement()
 		elementMsg := listElement.Message().Interface()
-		if err := ParseFromString(elementMsg, resultRow); err != nil {
+		if err := pbconv.ParseFromString(elementMsg, resultRow); err != nil {
 			return fmt.Errorf("parse row for table %s: %w", tableName, err)
 		}
 		listValue.Append(listElement)
@@ -1644,6 +1374,7 @@ func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause st
 	return nil
 }
 
+// FindAllByWhereClause 兼容原有非参数化批量查询
 // FindAllByWhereClause 兼容原有非参数化批量查询
 func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause string) error {
 	reflectionParent := message.ProtoReflect()
@@ -1670,7 +1401,8 @@ func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause stri
 		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 	}
 
-	sqlStmt := table.GetSelectSQL(false) + whereClause + ";"
+	// 补充WHERE关键字（修复语法错误）
+	sqlStmt := table.GetSelectSQL(false) + " WHERE " + whereClause + ";"
 	rows, err := p.DB.Query(sqlStmt)
 	if err != nil {
 		return fmt.Errorf("exec select all for table %s: %w, SQL: %s", tableName, err, sqlStmt)
@@ -1702,7 +1434,7 @@ func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause stri
 		}
 
 		listElement := listValue.NewElement()
-		if err := ParseFromString(listElement.Message().Interface(), result); err != nil {
+		if err := pbconv.ParseFromString(listElement.Message().Interface(), result); err != nil {
 			return fmt.Errorf("parse row for table %s: %w", tableName, err)
 		}
 		listValue.Append(listElement)
@@ -1723,45 +1455,44 @@ type MultiQuery struct {
 }
 
 // FindMultiByWhereClauses 一次查询多张无关表，返回多个结果
+// FindMultiByWhereClauses 一次查询多张无关表，返回多个结果
 func (p *PbMysqlDB) FindMultiByWhereClauses(queries []MultiQuery) error {
 	if len(queries) == 0 {
 		return errors.New("no queries provided")
 	}
 
-	// 1. 拼接批量SQL和收集所有参数
-	var sqlBuilder strings.Builder
+	// 1. 收集每张表的查询SQL（不含分号）
+	var sqlParts []string
 	var allArgs []interface{}
-	for i, q := range queries {
+	for _, q := range queries {
 		tableName := GetTableName(q.Message)
 		table, ok := p.Tables[tableName]
 		if !ok {
 			return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 		}
 
-		// 生成单表查询SQL（不含分号，最后统一处理）
+		// 生成单表查询SQL（包含WHERE子句，不含分号）
 		selectSQL := table.GetSelectSQL(false) + " WHERE " + q.WhereClause
-		if i > 0 {
-			sqlBuilder.WriteString("; ") // 用分号分隔多个SQL
-		}
-		sqlBuilder.WriteString(selectSQL)
+		sqlParts = append(sqlParts, selectSQL)
 
 		// 收集当前查询的参数
 		allArgs = append(allArgs, q.WhereArgs...)
 	}
-	// 最终添加分号
-	sqlStmt := sqlBuilder.String() + ";"
 
-	// 2. 执行批量查询
+	// 2. 用分号分隔多条SQL，最后不加多余分号（修复语法错误）
+	sqlStmt := strings.Join(sqlParts, "; ")
+
+	// 3. 执行批量查询
 	rows, err := p.DB.Query(sqlStmt, allArgs...)
 	if err != nil {
 		return fmt.Errorf("exec multi select: %w, SQL: %s, args: %v", err, sqlStmt, allArgs)
 	}
 	defer rows.Close()
 
-	// 3. 依次处理每个结果集（与queries顺序一致）
+	// 4. 依次处理每个结果集（与queries顺序一致）
 	for idx, q := range queries {
 		tableName := GetTableName(q.Message)
-		// 处理当前表的结果集（复用单表查询的字段解析逻辑）
+		// 处理当前表的结果集
 		columns, err := rows.Columns()
 		if err != nil {
 			return fmt.Errorf("get columns for table %s: %w", tableName, err)
@@ -1788,8 +1519,8 @@ func (p *PbMysqlDB) FindMultiByWhereClauses(queries []MultiQuery) error {
 				result[i] = string(v)
 			}
 
-			// 映射到消息体（复用现有ParseFromString方法）
-			if err := ParseFromString(q.Message, result); err != nil {
+			// 映射到消息体
+			if err := pbconv.ParseFromString(q.Message, result); err != nil {
 				return fmt.Errorf("parse row for table %s: %w", tableName, err)
 			}
 			found = true
