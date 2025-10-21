@@ -324,7 +324,7 @@ func TestLoadByWhereCase(t *testing.T) {
 
 	// 按条件查询（WHERE子句无需加"where"前缀）
 	pbLoad := &dbprotooption.GolangTest{}
-	if err := pbMySqlDB.FindOneByWhereClause(pbLoad, " WHERE id=1"); err != nil {
+	if err := pbMySqlDB.FindOneByWhereClause(pbLoad, "id=1"); err != nil {
 		t.Fatalf("执行FindOneByWhereClause失败: %v", err)
 	}
 	if !proto.Equal(pbSave, pbLoad) {
@@ -1226,7 +1226,6 @@ func TestUpdateFieldType(t *testing.T) {
 	}
 }
 
-// TestFindMultiByWhereClauses 测试批量查询多张无关表
 // TestFindMultiByWhereClauses 测试跨多张表的批量查询（golang_test1/2/3）
 func TestFindMultiByWhereClauses(t *testing.T) {
 	// 1. 初始化数据库连接
