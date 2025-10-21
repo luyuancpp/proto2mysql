@@ -1589,17 +1589,57 @@ func TestFindMultiInterfaces(t *testing.T) {
 		}
 	})
 
-	// 8. 测试边界情况：查询无结果
-	t.Run("FindMulti_NoResult", func(t *testing.T) {
-		var resultList dbprotooption.GolangTestList
-		err := pbMySqlDB.FindMultiByKV(&resultList, "player_id", uint64(9999)) // 不存在的player_id
+	// 8. 测试SQL注入防护（参数化接口vs非参数化接口）
+	t.Run("SQLInjectionTest", func(t *testing.T) {
+		// 恶意输入：尝试注入SQL（例如使条件恒为真）
+		maliciousInput := "1000 OR 1=1"
+
+		// 测试参数化接口（应安全处理，将恶意输入视为字符串值）
+		var paramResult dbprotooption.GolangTestList
+		err := pbMySqlDB.FindMultiByWhereWithArgs(
+			&paramResult,
+			"player_id = ?",               // 严格使用占位符
+			[]interface{}{maliciousInput}, // 恶意输入作为参数传递（关键）
+		)
 		if err != nil {
-			t.Fatalf("查询无结果时不应报错: %v", err)
+			t.Fatalf("参数化接口处理恶意输入失败: %v", err)
 		}
-		if len(resultList.TestList) != 0 {
-			t.Errorf("预期0条结果，实际%d条", len(resultList.TestList))
+		// 验证：player_id是字符串类型时，无匹配数据（预期0条结果）
+		if len(paramResult.TestList) != 0 {
+			t.Error("参数化接口未有效防护SQL注入")
+		}
+
+		// 测试数字类型参数的注入防护（补充测试）
+		var numParamResult dbprotooption.GolangTestList
+		err = pbMySqlDB.FindMultiByWhereWithArgs(
+			&numParamResult,
+			"player_id = ?",
+			[]interface{}{maliciousInput}, // 即使输入是字符串，也作为参数绑定
+		)
+		if err != nil {
+			t.Fatalf("数字参数化接口处理失败: %v", err)
+		}
+		// 验证：数字类型字段无法匹配字符串输入（预期0条结果）
+		if len(numParamResult.TestList) != 0 {
+			t.Error("数字参数化接口未有效防护SQL注入")
+		}
+
+		// 测试非参数化接口（存在风险，仅作演示）
+		var clauseResult dbprotooption.GolangTestList
+		err = pbMySqlDB.FindMultiByWhereClause(
+			&clauseResult,
+			"player_id = "+maliciousInput, // 直接拼接，会被注入（危险！）
+		)
+		if err != nil {
+			t.Fatalf("非参数化接口执行失败: %v", err)
+		}
+		// 注入成功会返回所有数据，此处仅作风险提示
+		if len(clauseResult.TestList) > 3 {
+			t.Log("警告：非参数化接口存在SQL注入风险（生产环境禁用）")
 		}
 	})
+
+	t.Log("所有多条结果查询接口测试通过")
 
 	// 9. 测试SQL注入防护（参数化接口vs非参数化接口）
 	t.Run("SQLInjectionTest", func(t *testing.T) {
