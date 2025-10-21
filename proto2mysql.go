@@ -1137,6 +1137,8 @@ func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause st
 }
 
 // FindOneByWhereClause 兼容原有非参数化查询
+// FindOneByWhereClause 非参数化的自定义条件查询（单条数据）
+// 注意：whereClause 是纯条件字符串（如 "id = 100"，无需包含WHERE）
 func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause string) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
@@ -1144,13 +1146,20 @@ func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause stri
 		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 	}
 
-	sqlStmt := table.GetSelectSQL(false) + whereClause + ";"
+	// 内部自动拼接 WHERE 关键字（外部无需传入WHERE）
+	whereSQL := "WHERE 1=1"
+	if whereClause != "" {
+		whereSQL = "WHERE " + whereClause
+	}
+	sqlStmt := table.GetSelectSQL(false) + " " + whereSQL + ";"
+
 	rows, err := p.DB.Query(sqlStmt)
 	if err != nil {
 		return fmt.Errorf("exec select for table %s: %w, SQL: %s", tableName, err, sqlStmt)
 	}
 	defer rows.Close()
 
+	// 处理结果集（省略重复代码，与之前一致）
 	columns, err := rows.Columns()
 	if err != nil {
 		return fmt.Errorf("get columns for table %s: %w", tableName, err)
@@ -1296,6 +1305,11 @@ func (p *PbMysqlDB) FindMultiByWhereWithArgs(message proto.Message, whereClause 
 // 注意：1. message 需是包含 repeated 字段的列表消息（如 golang_test_list）
 //  2. whereClause 是纯条件字符串（如 "player_id = 1000 AND group_id = 10"）
 //  3. 不建议用于有用户输入的场景（有SQL注入风险），仅用于内部固定条件查询
+//
+// FindMultiByWhereClause 非参数化的自定义条件查询（返回多条结果）
+// 注意：1. message 需是包含 repeated 字段的列表消息（如 golang_test_list）
+//  2. whereClause 是纯条件字符串（如 "player_id = 1000 AND group_id = 10"，无需包含WHERE）
+//  3. 不建议用于有用户输入的场景（有SQL注入风险）
 func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause string) error {
 	// 解析列表消息中的 repeated 字段
 	reflectionParent := message.ProtoReflect()
@@ -1324,8 +1338,13 @@ func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause st
 		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 	}
 
-	// 生成非参数化SQL（补充WHERE关键字，修复语法错误）
-	sqlStmt := table.GetSelectSQL(false) + " WHERE " + whereClause + ";"
+	// 内部自动拼接 WHERE 关键字（外部无需传入WHERE）
+	// 若条件为空，默认查询所有数据（WHERE 1=1 兼容无条件场景）
+	whereSQL := "WHERE 1=1"
+	if whereClause != "" {
+		whereSQL = "WHERE " + whereClause
+	}
+	sqlStmt := table.GetSelectSQL(false) + " " + whereSQL + ";"
 
 	// 执行查询
 	rows, err := p.DB.Query(sqlStmt)
@@ -1334,7 +1353,7 @@ func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause st
 	}
 	defer rows.Close()
 
-	// 处理结果集
+	// 处理结果集（省略重复代码，与之前一致）
 	columns, err := rows.Columns()
 	if err != nil {
 		return fmt.Errorf("get columns for table %s: %w", tableName, err)
@@ -1376,6 +1395,8 @@ func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause st
 
 // FindAllByWhereClause 兼容原有非参数化批量查询
 // FindAllByWhereClause 兼容原有非参数化批量查询
+// FindAllByWhereClause 兼容原有非参数化批量查询
+// 注意：whereClause 是纯条件字符串（如 "id > 100"，无需包含WHERE）
 func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause string) error {
 	reflectionParent := message.ProtoReflect()
 	md := reflectionParent.Descriptor()
@@ -1401,14 +1422,20 @@ func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause stri
 		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 	}
 
-	// 补充WHERE关键字（修复语法错误）
-	sqlStmt := table.GetSelectSQL(false) + " WHERE " + whereClause + ";"
+	// 内部自动拼接 WHERE 关键字（外部无需传入WHERE）
+	whereSQL := "WHERE 1=1"
+	if whereClause != "" {
+		whereSQL = "WHERE " + whereClause
+	}
+	sqlStmt := table.GetSelectSQL(false) + " " + whereSQL + ";"
+
 	rows, err := p.DB.Query(sqlStmt)
 	if err != nil {
 		return fmt.Errorf("exec select all for table %s: %w, SQL: %s", tableName, err, sqlStmt)
 	}
 	defer rows.Close()
 
+	// 处理结果集（省略重复代码，与之前一致）
 	columns, err := rows.Columns()
 	if err != nil {
 		return fmt.Errorf("get columns for table %s: %w", tableName, err)
