@@ -2,6 +2,7 @@ package proto2mysql
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"log"
@@ -157,11 +158,11 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		if !reflection.Has(fieldDesc) {
 			return "", nil
 		}
-		// 直接获取消息值，避免通过 Bytes 反序列化（更高效）
-		subMsg := reflection.Get(fieldDesc).Message()
-		ts := &timestamppb.Timestamp{}
-		if err := proto.UnmarshalOptions{Merge: true}.Unmarshal(subMsg.Interface().ProtoReflect().Marshal(), ts); err != nil {
-			return "", fmt.Errorf("serialize timestamp field %s: %w", fieldDesc.Name(), err)
+		// 正确获取 Timestamp 消息并序列化（修复核心错误）
+		subMsg := reflection.Get(fieldDesc).Message().Interface() // 获取具体消息接口
+		ts, ok := subMsg.(*timestamppb.Timestamp)
+		if !ok {
+			return "", fmt.Errorf("field %s is not a Timestamp", fieldDesc.Name())
 		}
 		// 处理零值 Timestamp（避免返回 0001-01-01 等不合理时间）
 		if ts.AsTime().IsZero() {
@@ -203,7 +204,9 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 	case protoreflect.Uint32Kind:
 		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint()), nil
 	case protoreflect.FloatKind:
-		return fmt.Sprintf("%g", reflection.Get(fieldDesc).Float()), nil
+		// float32 最大有效位数约为 7 位，使用 'f' 格式避免科学计数法
+		val := reflection.Get(fieldDesc).Float()          // 此时是 float64，但实际是 float32 精度
+		return strconv.FormatFloat(val, 'f', -1, 32), nil // -1 表示自动保留有效位数
 	case protoreflect.StringKind:
 		return reflection.Get(fieldDesc).String(), nil
 	case protoreflect.Int64Kind:
@@ -213,14 +216,16 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		// 关键修复：使用 strconv.FormatUint 避免无符号数被解析为负数
 		return strconv.FormatUint(reflection.Get(fieldDesc).Uint(), 10), nil
 	case protoreflect.DoubleKind:
-		return fmt.Sprintf("%g", reflection.Get(fieldDesc).Float()), nil
+		// float64 最大有效位数约为 15 位
+		val := reflection.Get(fieldDesc).Float()
+		return strconv.FormatFloat(val, 'f', -1, 64), nil
 	case protoreflect.BoolKind:
 		return fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool()), nil
 	case protoreflect.EnumKind:
 		// 建议同时返回枚举的字符串值（如果需要可读性），这里保持原逻辑
 		return fmt.Sprintf("%d", int32(reflection.Get(fieldDesc).Enum())), nil
 	case protoreflect.BytesKind:
-		return string(reflection.Get(fieldDesc).Bytes()), nil
+		return base64.StdEncoding.EncodeToString(reflection.Get(fieldDesc).Bytes()), nil
 	case protoreflect.MessageKind:
 		if reflection.Has(fieldDesc) {
 			subMsg := reflection.Get(fieldDesc).Message()
@@ -371,7 +376,11 @@ func ParseFromString(message proto.Message, row []string) error {
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfEnum(protoreflect.EnumNumber(val)))
 		case protoreflect.BytesKind:
-			reflection.Set(fieldDesc, protoreflect.ValueOfBytes([]byte(row[i])))
+			data, err := base64.StdEncoding.DecodeString(row[i])
+			if err != nil {
+				return fmt.Errorf("decode bytes field %s: %w", fieldName, err)
+			}
+			reflection.Set(fieldDesc, protoreflect.ValueOfBytes(data))
 		case protoreflect.MessageKind:
 			subMsg := reflection.Mutable(fieldDesc).Message()
 			if err := proto.Unmarshal([]byte(row[i]), subMsg.Interface()); err != nil {
@@ -1441,7 +1450,6 @@ func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause stri
 	return nil
 }
 
-
 // FindMultiByKV 通过键值对查询多条结果（简化版，自动拼接 "whereKey = ?" 条件）
 // 注意：message 需是包含 repeated 字段的列表消息（如 golang_test_list）
 func (p *PbMysqlDB) FindMultiByKV(message proto.Message, whereKey string, whereVal interface{}) error {
@@ -1519,7 +1527,7 @@ func (p *PbMysqlDB) FindMultiByWhereWithArgs(message proto.Message, whereClause 
 		}
 
 		// 创建新的元素并解析数据
-		listElement := listValue.NewElement() // 创建repeated字段的元素实例
+		listElement := listValue.NewElement()           // 创建repeated字段的元素实例
 		elementMsg := listElement.Message().Interface() // 获取元素的消息接口
 		if err := ParseFromString(elementMsg, resultRow); err != nil {
 			return fmt.Errorf("parse row for table %s: %w", tableName, err)
@@ -1539,8 +1547,8 @@ func (p *PbMysqlDB) FindMultiByWhereWithArgs(message proto.Message, whereClause 
 
 // FindMultiByWhereClause 非参数化的自定义条件查询（返回多条结果）
 // 注意：1. message 需是包含 repeated 字段的列表消息（如 golang_test_list）
-//      2. whereClause 是纯条件字符串（如 "player_id = 1000 AND group_id = 10"）
-//      3. 不建议用于有用户输入的场景（有SQL注入风险），仅用于内部固定条件查询
+//  2. whereClause 是纯条件字符串（如 "player_id = 1000 AND group_id = 10"）
+//  3. 不建议用于有用户输入的场景（有SQL注入风险），仅用于内部固定条件查询
 func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause string) error {
 	// 解析列表消息中的 repeated 字段
 	reflectionParent := message.ProtoReflect()
@@ -1692,9 +1700,9 @@ func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause stri
 
 // MultiQuery 单张表的查询参数
 type MultiQuery struct {
-	Message      proto.Message // 用于接收查询结果的消息体
-	WhereClause  string        // 查询条件（如 "id = ?"）
-	WhereArgs    []interface{} // 条件中的参数（与?对应）
+	Message     proto.Message // 用于接收查询结果的消息体
+	WhereClause string        // 查询条件（如 "id = ?"）
+	WhereArgs   []interface{} // 条件中的参数（与?对应）
 }
 
 // FindMultiByWhereClauses 一次查询多张无关表，返回多个结果
