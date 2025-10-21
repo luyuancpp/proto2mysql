@@ -8,6 +8,7 @@ import (
 	"github.com/luyuancpp/proto2mysql/pbconv"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/known/timestamppb"
 	"log"
 	"reflect"
@@ -410,77 +411,70 @@ func (p *PbMysqlDB) CreateOrUpdateTable(m proto.Message) error {
 
 // list 必须是一个包含 repeated 字段的 protobuf 消息（如 GolangTestList）
 func (db *PbMysqlDB) scanRowsToList(rows *sql.Rows, list proto.Message) error {
-	// 检查 list 是否为 proto.Message
-	if list == nil {
-		return fmt.Errorf("list 不能为 nil")
+	listVal := reflect.ValueOf(list)
+	if listVal.Kind() != reflect.Ptr {
+		return fmt.Errorf("list must be a pointer to a proto message list")
 	}
-	listReflect := list.ProtoReflect()
-	if !listReflect.IsValid() {
-		return fmt.Errorf("list 必须是有效的 protobuf 消息")
+	listVal = listVal.Elem()
+	if listVal.Kind() != reflect.Struct {
+		return fmt.Errorf("list must be a struct (proto message list)")
 	}
 
-	// 获取列表中 repeated 字段的描述符（假设只有一个 repeated 字段，即列表项）
-	var itemField protoreflect.FieldDescriptor
-	fields := listReflect.Descriptor().Fields()
-	for i := 0; i < fields.Len(); i++ { // 替换 Do 方法，使用索引遍历
-		fd := fields.Get(i)
-		if fd.IsList() { // 找到 repeated 字段
-			itemField = fd
+	// 1. 统一获取 repeated 字段的元素类型（*T）
+	elemType, err := GetRepeatedFieldElementType(list)
+	if err != nil {
+		return fmt.Errorf("failed to get repeated field element type: %w", err)
+	}
+
+	// 2. 查找列表中的 repeated 字段（切片）
+	var field reflect.Value
+	listType := listVal.Type()
+	for i := 0; i < listType.NumField(); i++ {
+		fieldVal := listVal.Field(i)
+		if fieldVal.Kind() == reflect.Slice && fieldVal.Type().Elem() == elemType {
+			field = fieldVal
 			break
 		}
 	}
-	if itemField == nil {
-		return fmt.Errorf("list 消息中未找到 repeated 字段")
+	if !field.IsValid() {
+		return fmt.Errorf("repeated field not found in list message")
 	}
 
-	// 获取列表项的类型（如 *GolangTest）
-	itemType := itemField.Message()
-	if itemType == nil {
-		return fmt.Errorf("repeated 字段不是消息类型")
+	// 3. 获取结果集字段名（用于日志调试）
+	cols, err := rows.Columns()
+	if err != nil {
+		return fmt.Errorf("get columns failed: %w", err)
 	}
 
-	// 遍历查询结果行
+	// 4. 遍历每行数据，通过 pbconv 反序列化
 	for rows.Next() {
-		// 创建一个新的列表项实例（替换 proto.MessageType，使用反射创建）
-		item := proto.Clone(reflect.New(reflect.TypeOf(list).Elem().Field(0).Type.Elem()).Interface().(proto.Message))
-		// 将行数据扫描到单个 item 中
-		if err := db.scanRowToMessage(rows, item); err != nil {
-			return fmt.Errorf("扫描行数据失败: %v", err)
+		// 创建当前行的扫描目标（存储字符串数组，适配 pbconv.ParseFromString）
+		rowStrings := make([]string, len(cols))
+		rowValues := make([]interface{}, len(cols))
+		for i := range rowValues {
+			rowValues[i] = &rowStrings[i] // 直接扫描到字符串
 		}
 
-		// 将 item 添加到 list 的 repeated 字段中
-		listVal := listReflect.Mutable(itemField).List()
-		listVal.Append(protoreflect.ValueOf(item.ProtoReflect()))
+		// 扫描当前行到字符串数组
+		if err := rows.Scan(rowValues...); err != nil {
+			return fmt.Errorf("scan row failed: %w", err)
+		}
+
+		// 创建元素实例并通过 pbconv 反序列化
+		elem := reflect.New(elemType.Elem()).Interface().(proto.Message)
+		if err := pbconv.ParseFromString(elem, rowStrings); err != nil {
+			return fmt.Errorf("parse row to message failed: %w, row: %v", err, rowStrings)
+		}
+
+		// 添加到列表
+		field.Set(reflect.Append(field, reflect.ValueOf(elem)))
 	}
 
-	// 检查行遍历过程中的错误
+	// 检查迭代错误
 	if err := rows.Err(); err != nil {
-		return fmt.Errorf("行遍历错误: %v", err)
-	}
-	return nil
-}
-
-// 辅助函数：将单行数据扫描到单个 protobuf 消息中
-func (db *PbMysqlDB) scanRowToMessage(rows *sql.Rows, msg proto.Message) error {
-	// 获取消息的反射对象
-	msgReflect := msg.ProtoReflect()
-	// 获取消息的所有字段
-	fields := msgReflect.Descriptor().Fields()
-
-	// 准备扫描目标：每个字段对应一个指针，用于接收 SQL 行数据
-	scanTargets := make([]interface{}, 0, fields.Len())
-	for i := 0; i < fields.Len(); i++ { // 替换 Do 方法，使用索引遍历
-		fd := fields.Get(i)
-		// 根据字段类型创建对应的指针
-		fieldValue := msgReflect.Get(fd)
-		target := getScanTarget(fieldValue, fd.Kind()) // 从 fd 获取 Kind
-		scanTargets = append(scanTargets, target)
+		return fmt.Errorf("rows error: %w", err)
 	}
 
-	// 执行扫描，将 SQL 行数据写入 scanTargets
-	if err := rows.Scan(scanTargets...); err != nil {
-		return fmt.Errorf("扫描数据到消息失败: %v", err)
-	}
 	return nil
 }
 
@@ -1291,9 +1285,47 @@ func getMessageFields(msg proto.Message) []protoreflect.FieldDescriptor {
 	return result
 }
 
-// GetElementTableName 从包含repeated字段的列表消息中，获取其元素类型对应的表名
-// 例如：对于 message golang_test_list { repeated golang_test test_list = 1; }
-// 会返回 "golang_test"
+func GetRepeatedFieldElementType(list proto.Message) (reflect.Type, error) {
+	if list == nil {
+		return nil, errors.New("list message cannot be nil")
+	}
+
+	// 1. 查找唯一的 repeated 字段
+	listReflect := list.ProtoReflect()
+	listDesc := listReflect.Descriptor()
+	var elementField protoreflect.FieldDescriptor
+
+	fields := listDesc.Fields()
+	for i := 0; i < fields.Len(); i++ {
+		fd := fields.Get(i)
+		if fd.IsList() { // 找到 repeated 字段
+			if elementField != nil {
+				return nil, ErrMultipleRepeated
+			}
+			elementField = fd
+		}
+	}
+	if elementField == nil {
+		return nil, ErrNoRepeatedField
+	}
+
+	// 2. 验证元素类型是 message
+	elementDesc := elementField.Message()
+	if elementDesc == nil {
+		return nil, fmt.Errorf("repeated field %s is not a message type", elementField.Name())
+	}
+
+	// 3. 通过全局类型注册表查找消息类型（替换 proto.MessageType）
+	elemType, err := protoregistry.GlobalTypes.FindMessageByName(elementDesc.FullName())
+	if err != nil {
+		return nil, fmt.Errorf("failed to find message type %s: %w", elementDesc.FullName(), err)
+	}
+
+	// 4. 创建实例并返回其反射类型（*T）
+	elemInstance := elemType.New().Interface()
+	return reflect.TypeOf(elemInstance), nil
+}
+
 func GetElementTableName(list proto.Message) (string, error) {
 	if list == nil {
 		return "", errors.New("list message cannot be nil")
