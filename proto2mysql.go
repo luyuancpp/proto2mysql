@@ -30,8 +30,7 @@ var (
 	keywordRegex = regexp.MustCompile(mysqlKeywordPattern)
 	t            = timestamppb.Timestamp{}
 	// 预定义Timestamp类型的全名
-	timestampFullName = t.ProtoReflect().Descriptor().FullName()
-	// 自定义错误类型
+	timestampFullName       = t.ProtoReflect().Descriptor().FullName()
 	ErrTableNotFound        = errors.New("table not found")
 	ErrNoRepeatedField      = errors.New("message has no repeated field")
 	ErrMultipleRepeated     = errors.New("message has multiple repeated fields")
@@ -81,17 +80,6 @@ type MessageTable struct {
 	columnsMu     sync.RWMutex // 保护cachedColumns的并发安全
 }
 
-// SetAutoIncrement 设置自增起始值
-func (m *MessageTable) SetAutoIncrement(autoIncrement uint64) {
-	m.autoIncrement = autoIncrement
-}
-
-// DefaultInstance 获取默认消息实例
-func (m *MessageTable) DefaultInstance() proto.Message {
-	return m.defaultInstance
-}
-
-// getMySQLFieldType 获取字段对应的MySQL目标类型（支持Timestamp特殊处理）
 // getMySQLFieldType 获取字段对应的MySQL目标类型（支持Timestamp特殊处理）
 func (m *MessageTable) getMySQLFieldType(fieldDesc protoreflect.FieldDescriptor) string {
 	// 特殊处理Timestamp类型
@@ -996,27 +984,6 @@ func (m *MessageTable) GetUpdateSQLByWhereWithArgs(message proto.Message, whereC
 	return &SqlWithArgs{Sql: fullSQL, Args: fullArgs}, nil
 }
 
-// Update 执行参数化的按主键更新操作（直接用DB，无Tx）
-func (p *PbMysqlDB) Update(message proto.Message) error {
-	tableName := GetTableName(message)
-	table, ok := p.Tables[tableName]
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
-	}
-
-	sqlWithArgs, err := table.GetUpdateSQLWithArgs(message)
-	if sqlWithArgs == nil || err != nil {
-		return fmt.Errorf("generate update SQL for table %s: %w", tableName, err)
-	}
-
-	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
-	if err != nil {
-		return fmt.Errorf("exec update for table %s: sql=%s, args=%v, err=%w",
-			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
-	}
-	return nil
-}
-
 // Init 初始化MessageTable的SQL片段
 func (m *MessageTable) Init() {
 	m.fieldNameToDesc = make(map[string]protoreflect.FieldDescriptor)
@@ -1246,9 +1213,6 @@ func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause st
 	return nil
 }
 
-// FindOneByWhereClause 兼容原有非参数化查询
-// FindOneByWhereClause 非参数化的自定义条件查询（单条数据）
-// 注意：whereClause 是纯条件字符串（如 "id = 100"，无需包含WHERE）
 func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause string) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
@@ -1446,9 +1410,6 @@ func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause st
 	return nil
 }
 
-// FindAllByWhereClause 兼容原有非参数化批量查询
-// FindAllByWhereClause 兼容原有非参数化批量查询
-// FindAllByWhereClause 兼容原有非参数化批量查询
 // 注意：whereClause 是纯条件字符串（如 "id > 100"，无需包含WHERE）
 func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause string) error {
 	reflectionParent := message.ProtoReflect()
