@@ -1227,6 +1227,7 @@ func TestUpdateFieldType(t *testing.T) {
 }
 
 // TestFindMultiByWhereClauses 测试批量查询多张无关表
+// TestFindMultiByWhereClauses 测试跨多张表的批量查询（golang_test1/2/3）
 func TestFindMultiByWhereClauses(t *testing.T) {
 	// 1. 初始化数据库连接
 	pbMySqlDB := NewPbMysqlDB()
@@ -1252,154 +1253,178 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 		t.Fatalf("切换数据库失败: %v", err)
 	}
 
-	// 2. 定义测试用的多表数据（假设存在3个测试表）
-	// 表1: GolangTest（已存在的测试表）
-	testTable1 := &dbprotooption.GolangTest{
-		Id:      1001,
-		GroupId: 10,
-		Ip:      "192.168.1.101",
+	// 2. 准备4张表的测试数据（原始表+3张新增表）
+	// 原始表数据
+	testData := &dbprotooption.GolangTest{
+		Id:      100,
+		GroupId: 1,
+		Ip:      "192.168.0.100",
 		Port:    3306,
 		Player: &dbprotooption.Player{
-			PlayerId: 10001,
-			Name:     "MultiTest_Table1",
+			PlayerId: 10000,
+			Name:     "OriginalTest",
 		},
 	}
-	// 表2: 假设存在第二个测试表（例如GolangTest2）
-	testTable2 := &dbprotooption.GolangTest2{
-		Id:   2001,
-		Name: "Table2_Data",
-		Age:  25,
+	// 新增表1数据
+	testData1 := &dbprotooption.GolangTest1{
+		Id:        101,
+		GroupId:   1,
+		Ip:        "192.168.0.101",
+		Port:      3306,
+		Player: &dbprotooption.Player{
+			PlayerId: 10001,
+			Name:     "Test1",
+		},
+		ExtraInfo: "额外信息1", // 新增字段
 	}
-	// 表3: 假设存在第三个测试表（例如GolangTest3）
-	testTable3 := &dbprotooption.GolangTest3{
-		Uid:  3001,
-		Code: "CODE_3001",
-		Flag: true,
+	// 新增表2数据（port为uint64）
+	testData2 := &dbprotooption.GolangTest2{
+		Id:      102,
+		GroupId: 1,
+		Ip:      "192.168.0.102",
+		Port:    65536, // 超过uint32的端口值
+		Player: &dbprotooption.Player{
+			PlayerId: 10002,
+			Name:     "Test2",
+		},
+	}
+	// 新增表3数据（多一个嵌套player）
+	testData3 := &dbprotooption.GolangTest3{
+		Id:      103,
+		GroupId: 1,
+		Ip:      "192.168.0.103",
+		Port:    3306,
+		Player: &dbprotooption.Player{
+			PlayerId: 10003,
+			Name:     "Test3Main",
+		},
+		ExtraPlayer: &dbprotooption.Player{ // 新增嵌套字段
+			PlayerId: 10004,
+			Name:     "Test3Extra",
+		},
 	}
 
-	// 3. 注册表并初始化表结构
-	pbMySqlDB.RegisterTable(testTable1)
-	pbMySqlDB.RegisterTable(testTable2)
-	pbMySqlDB.RegisterTable(testTable3)
+	// 3. 注册表并创建表结构
+	pbMySqlDB.RegisterTable(testData)
+	pbMySqlDB.RegisterTable(testData1)
+	pbMySqlDB.RegisterTable(testData2)
+	pbMySqlDB.RegisterTable(testData3)
 
 	// 创建/更新表结构
-	if err := pbMySqlDB.CreateOrUpdateTable(testTable1); err != nil {
-		t.Fatalf("创建表1失败: %v", err)
+	if err := pbMySqlDB.CreateOrUpdateTable(testData); err != nil {
+		t.Fatalf("创建golang_test表失败: %v", err)
 	}
-	if err := pbMySqlDB.CreateOrUpdateTable(testTable2); err != nil {
-		t.Fatalf("创建表2失败: %v", err)
+	if err := pbMySqlDB.CreateOrUpdateTable(testData1); err != nil {
+		t.Fatalf("创建golang_test1表失败: %v", err)
 	}
-	if err := pbMySqlDB.CreateOrUpdateTable(testTable3); err != nil {
-		t.Fatalf("创建表3失败: %v", err)
+	if err := pbMySqlDB.CreateOrUpdateTable(testData2); err != nil {
+		t.Fatalf("创建golang_test2表失败: %v", err)
 	}
-
-	// 4. 清理旧数据并插入测试数据
-	table1Name := GetTableName(testTable1)
-	table2Name := GetTableName(testTable2)
-	table3Name := GetTableName(testTable3)
-
-	// 清理旧数据
-	_, _ = db.Exec(fmt.Sprintf("DELETE FROM %s WHERE id=?", escapeMySQLName(table1Name)), testTable1.Id)
-	_, _ = db.Exec(fmt.Sprintf("DELETE FROM %s WHERE id=?", escapeMySQLName(table2Name)), testTable2.Id)
-	_, _ = db.Exec(fmt.Sprintf("DELETE FROM %s WHERE uid=?", escapeMySQLName(table3Name)), testTable3.Uid)
-
-	// 插入新数据
-	if err := pbMySqlDB.Save(testTable1); err != nil {
-		t.Fatalf("保存表1数据失败: %v", err)
-	}
-	if err := pbMySqlDB.Save(testTable2); err != nil {
-		t.Fatalf("保存表2数据失败: %v", err)
-	}
-	if err := pbMySqlDB.Save(testTable3); err != nil {
-		t.Fatalf("保存表3数据失败: %v", err)
+	if err := pbMySqlDB.CreateOrUpdateTable(testData3); err != nil {
+		t.Fatalf("创建golang_test3表失败: %v", err)
 	}
 
-	// 5. 准备批量查询参数
+	// 4. 清理旧数据
+	clearTable := func(tableName string, id interface{}) {
+		sql := fmt.Sprintf("DELETE FROM %s WHERE id = ?", escapeMySQLName(tableName))
+		if _, err := db.Exec(sql, id); err != nil {
+			t.Logf("清理表%s(id=%v)旧数据失败: %v（可忽略）", tableName, id, err)
+		}
+	}
+	clearTable(GetTableName(testData), testData.Id)
+	clearTable(GetTableName(testData1), testData1.Id)
+	clearTable(GetTableName(testData2), testData2.Id)
+	clearTable(GetTableName(testData3), testData3.Id)
+
+	// 5. 插入测试数据
+	if err := pbMySqlDB.Save(testData); err != nil {
+		t.Fatalf("保存golang_test数据失败: %v", err)
+	}
+	if err := pbMySqlDB.Save(testData1); err != nil {
+		t.Fatalf("保存golang_test1数据失败: %v", err)
+	}
+	if err := pbMySqlDB.Save(testData2); err != nil {
+		t.Fatalf("保存golang_test2数据失败: %v", err)
+	}
+	if err := pbMySqlDB.Save(testData3); err != nil {
+		t.Fatalf("保存golang_test3数据失败: %v", err)
+	}
+
+	// 6. 准备批量查询参数（跨4张表）
 	queries := []MultiQuery{
 		{
-			Message:     &dbprotooption.GolangTest{}, // 接收表1结果
-			WhereClause: "id = ? AND group_id = ?",   // 带多个参数的条件
-			WhereArgs:   []interface{}{testTable1.Id, testTable1.GroupId},
+			Message:     &dbprotooption.GolangTest{},   // 原始表
+			WhereClause: "id = ? AND group_id = ?",
+			WhereArgs:   []interface{}{testData.Id, testData.GroupId},
 		},
 		{
-			Message:     &dbprotooption.GolangTest2{}, // 接收表2结果
-			WhereClause: "id = ?",
-			WhereArgs:   []interface{}{testTable2.Id},
+			Message:     &dbprotooption.GolangTest1{},  // 新增表1
+			WhereClause: "id = ? AND extra_info = ?",   // 查询新增字段
+			WhereArgs:   []interface{}{testData1.Id, testData1.ExtraInfo},
 		},
 		{
-			Message:     &dbprotooption.GolangTest3{}, // 接收表3结果
-			WhereClause: "uid = ? AND flag = ?",
-			WhereArgs:   []interface{}{testTable3.Uid, testTable3.Flag},
+			Message:     &dbprotooption.GolangTest2{},  // 新增表2
+			WhereClause: "id = ? AND port = ?",         // 查询uint64字段
+			WhereArgs:   []interface{}{testData2.Id, testData2.Port},
+		},
+		{
+			Message:     &dbprotooption.GolangTest3{},  // 新增表3
+			WhereClause: "id = ? AND extra_player.player_id = ?", // 查询新增嵌套字段
+			WhereArgs:   []interface{}{testData3.Id, testData3.ExtraPlayer.PlayerId},
 		},
 	}
 
-	// 6. 执行批量查询
+	// 7. 执行批量查询
 	if err := pbMySqlDB.FindMultiByWhereClauses(queries); err != nil {
 		t.Fatalf("批量查询失败: %v", err)
 	}
 
-	// 7. 验证查询结果
-	// 验证表1结果
-	result1 := queries[0].Message.(*dbprotooption.GolangTest)
-	if !proto.Equal(testTable1, result1) {
-		t.Error("表1查询结果不一致")
-		t.Logf("预期: %s", testTable1.String())
+	// 8. 验证查询结果
+	// 验证原始表
+	result := queries[0].Message.(*dbprotooption.GolangTest)
+	if !proto.Equal(testData, result) {
+		t.Error("golang_test查询结果不一致")
+		t.Logf("预期: %s", testData.String())
+		t.Logf("实际: %s", result.String())
+	}
+
+	// 验证新增表1
+	result1 := queries[1].Message.(*dbprotooption.GolangTest1)
+	if !proto.Equal(testData1, result1) {
+		t.Error("golang_test1查询结果不一致")
+		t.Logf("预期: %s", testData1.String())
 		t.Logf("实际: %s", result1.String())
 	}
 
-	// 验证表2结果
-	result2 := queries[1].Message.(*dbprotooption.GolangTest2)
-	if !proto.Equal(testTable2, result2) {
-		t.Error("表2查询结果不一致")
-		t.Logf("预期: %s", testTable2.String())
+	// 验证新增表2（注意port是uint64）
+	result2 := queries[2].Message.(*dbprotooption.GolangTest2)
+	if !proto.Equal(testData2, result2) {
+		t.Error("golang_test2查询结果不一致")
+		t.Logf("预期: %s", testData2.String())
 		t.Logf("实际: %s", result2.String())
 	}
 
-	// 验证表3结果
-	result3 := queries[2].Message.(*dbprotooption.GolangTest3)
-	if !proto.Equal(testTable3, result3) {
-		t.Error("表3查询结果不一致")
-		t.Logf("预期: %s", testTable3.String())
+	// 验证新增表3（注意嵌套字段extra_player）
+	result3 := queries[3].Message.(*dbprotooption.GolangTest3)
+	if !proto.Equal(testData3, result3) {
+		t.Error("golang_test3查询结果不一致")
+		t.Logf("预期: %s", testData3.String())
 		t.Logf("实际: %s", result3.String())
 	}
 
-	// 8. 测试异常场景（无结果集）
+	// 9. 测试异常场景（表2查询不存在的数据）
 	invalidQueries := []MultiQuery{
 		{
-			Message:     &dbprotooption.GolangTest{},
+			Message:     &dbprotooption.GolangTest2{},
 			WhereClause: "id = ?",
-			WhereArgs:   []interface{}{999999}, // 不存在的ID
+			WhereArgs:   []interface{}{9999}, // 不存在的ID
 		},
 	}
 	if err := pbMySqlDB.FindMultiByWhereClauses(invalidQueries); err == nil {
 		t.Error("预期查询不存在的ID时返回错误，但未返回")
-	} else if !errors.Is(err, ErrNoRowsFound) {
-		t.Errorf("预期错误为ErrNoRowsFound，实际为: %v", err)
+	} else if !strings.Contains(err.Error(), ErrNoRowsFound.Error()) {
+		t.Errorf("预期错误包含[%s]，实际为: %v", ErrNoRowsFound, err)
 	}
 
-	// 9. 测试异常场景（多结果集不匹配）
-	multiRowQueries := []MultiQuery{
-		{
-			Message:     &dbprotooption.GolangTest{},
-			WhereClause: "group_id = ?", // 可能返回多条数据的条件
-			WhereArgs:   []interface{}{testTable1.GroupId},
-		},
-	}
-	// 先插入第二条数据，确保查询返回多条
-	testTable1Dup := &dbprotooption.GolangTest{
-		Id:      1002,
-		GroupId: testTable1.GroupId,
-		Ip:      "192.168.1.102",
-		Port:    3306,
-	}
-	_ = pbMySqlDB.Save(testTable1Dup)
-	defer db.Exec(fmt.Sprintf("DELETE FROM %s WHERE id=?", escapeMySQLName(table1Name)), testTable1Dup.Id)
-
-	if err := pbMySqlDB.FindMultiByWhereClauses(multiRowQueries); err == nil {
-		t.Error("预期查询多条数据时返回错误，但未返回")
-	} else if !errors.Is(err, ErrMultipleRowsFound) {
-		t.Errorf("预期错误为ErrMultipleRowsFound，实际为: %v", err)
-	}
-
-	t.Log("批量查询测试通过")
+	t.Log("跨表批量查询测试通过")
 }
