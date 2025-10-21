@@ -1512,6 +1512,105 @@ func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause stri
 	return nil
 }
 
+// MultiQuery 单张表的查询参数
+type MultiQuery struct {
+	Message      proto.Message // 用于接收查询结果的消息体
+	WhereClause  string        // 查询条件（如 "id = ?"）
+	WhereArgs    []interface{} // 条件中的参数（与?对应）
+}
+
+// FindMultiByWhereClauses 一次查询多张无关表，返回多个结果
+func (p *PbMysqlDB) FindMultiByWhereClauses(queries []MultiQuery) error {
+	if len(queries) == 0 {
+		return errors.New("no queries provided")
+	}
+
+	// 1. 拼接批量SQL和收集所有参数
+	var sqlBuilder strings.Builder
+	var allArgs []interface{}
+	for i, q := range queries {
+		tableName := GetTableName(q.Message)
+		table, ok := p.Tables[tableName]
+		if !ok {
+			return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+		}
+
+		// 生成单表查询SQL（不含分号，最后统一处理）
+		selectSQL := table.GetSelectSQL(false) + " WHERE " + q.WhereClause
+		if i > 0 {
+			sqlBuilder.WriteString("; ") // 用分号分隔多个SQL
+		}
+		sqlBuilder.WriteString(selectSQL)
+
+		// 收集当前查询的参数
+		allArgs = append(allArgs, q.WhereArgs...)
+	}
+	// 最终添加分号
+	sqlStmt := sqlBuilder.String() + ";"
+
+	// 2. 执行批量查询
+	rows, err := p.DB.Query(sqlStmt, allArgs...)
+	if err != nil {
+		return fmt.Errorf("exec multi select: %w, SQL: %s, args: %v", err, sqlStmt, allArgs)
+	}
+	defer rows.Close()
+
+	// 3. 依次处理每个结果集（与queries顺序一致）
+	for idx, q := range queries {
+		tableName := GetTableName(q.Message)
+		// 处理当前表的结果集（复用单表查询的字段解析逻辑）
+		columns, err := rows.Columns()
+		if err != nil {
+			return fmt.Errorf("get columns for table %s: %w", tableName, err)
+		}
+
+		columnValues := make([][]byte, len(columns))
+		scans := make([]interface{}, len(columns))
+		for k := range columnValues {
+			scans[k] = &columnValues[k]
+		}
+
+		found := false
+		for rows.Next() {
+			if found {
+				return fmt.Errorf("%w: %s", ErrMultipleRowsFound, tableName)
+			}
+			if err := rows.Scan(scans...); err != nil {
+				return fmt.Errorf("scan row for table %s: %w", tableName, err)
+			}
+
+			// 转换查询结果为字符串数组
+			result := make([]string, len(columns))
+			for i, v := range columnValues {
+				result[i] = string(v)
+			}
+
+			// 映射到消息体（复用现有ParseFromString方法）
+			if err := ParseFromString(q.Message, result); err != nil {
+				return fmt.Errorf("parse row for table %s: %w", tableName, err)
+			}
+			found = true
+		}
+
+		// 检查当前结果集的错误
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("rows error for table %s: %w", tableName, err)
+		}
+		if !found {
+			return fmt.Errorf("%w: %s", ErrNoRowsFound, tableName)
+		}
+
+		// 切换到下一个结果集（最后一个不需要切换）
+		if idx < len(queries)-1 {
+			if !rows.NextResultSet() {
+				return fmt.Errorf("missing result set for table %s", GetTableName(queries[idx+1].Message))
+			}
+		}
+	}
+
+	return nil
+}
+
 // RegisterTable 注册Protobuf与表的映射关系
 func (p *PbMysqlDB) RegisterTable(m proto.Message, opts ...TableOption) {
 	tableName := GetTableName(m)
