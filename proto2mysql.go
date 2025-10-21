@@ -149,29 +149,27 @@ func (p *PbMysqlDB) OpenDB(db *sql.DB, dbname string) error {
 	return err
 }
 
-// 序列化字段（增强Timestamp处理）
+// 序列化字段（完善二进制编码和对称性）
 func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor) (string, error) {
 	reflection := message.ProtoReflect()
 
-	// 特殊处理 Timestamp 类型（先检查是否为消息类型，避免空指针）
+	// 特殊处理 Timestamp 类型
 	if fieldDesc.Kind() == protoreflect.MessageKind && fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
 		if !reflection.Has(fieldDesc) {
 			return "", nil
 		}
-		// 正确获取 Timestamp 消息并序列化（修复核心错误）
-		subMsg := reflection.Get(fieldDesc).Message().Interface() // 获取具体消息接口
+		subMsg := reflection.Get(fieldDesc).Message().Interface()
 		ts, ok := subMsg.(*timestamppb.Timestamp)
 		if !ok {
 			return "", fmt.Errorf("field %s is not a Timestamp", fieldDesc.Name())
 		}
-		// 处理零值 Timestamp（避免返回 0001-01-01 等不合理时间）
 		if ts.AsTime().IsZero() {
 			return "", nil
 		}
 		return ts.AsTime().Format("2006-01-02 15:04:05"), nil
 	}
 
-	// 处理 map 类型
+	// 处理 map 类型（Base64 编码）
 	if fieldDesc.IsMap() {
 		if !reflection.Has(fieldDesc) {
 			return "", nil
@@ -181,10 +179,10 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		if err != nil {
 			return "", fmt.Errorf("serialize map field %s: %w", fieldDesc.Name(), err)
 		}
-		return string(data), nil
+		return base64.StdEncoding.EncodeToString(data), nil
 	}
 
-	// 处理 list 类型
+	// 处理 list 类型（Base64 编码）
 	if fieldDesc.IsList() {
 		if !reflection.Has(fieldDesc) {
 			return "", nil
@@ -194,7 +192,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 		if err != nil {
 			return "", fmt.Errorf("serialize list field %s: %w", fieldDesc.Name(), err)
 		}
-		return string(data), nil
+		return base64.StdEncoding.EncodeToString(data), nil
 	}
 
 	// 处理基本类型
@@ -204,36 +202,31 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 	case protoreflect.Uint32Kind:
 		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint()), nil
 	case protoreflect.FloatKind:
-		// float32 最大有效位数约为 7 位，使用 'f' 格式避免科学计数法
-		val := reflection.Get(fieldDesc).Float()          // 此时是 float64，但实际是 float32 精度
-		return strconv.FormatFloat(val, 'f', -1, 32), nil // -1 表示自动保留有效位数
+		val := reflection.Get(fieldDesc).Float()
+		return strconv.FormatFloat(val, 'f', -1, 32), nil
 	case protoreflect.StringKind:
 		return reflection.Get(fieldDesc).String(), nil
 	case protoreflect.Int64Kind:
-		// 使用 strconv.FormatInt 确保 int64 正确格式化
 		return strconv.FormatInt(reflection.Get(fieldDesc).Int(), 10), nil
 	case protoreflect.Uint64Kind:
-		// 关键修复：使用 strconv.FormatUint 避免无符号数被解析为负数
 		return strconv.FormatUint(reflection.Get(fieldDesc).Uint(), 10), nil
 	case protoreflect.DoubleKind:
-		// float64 最大有效位数约为 15 位
 		val := reflection.Get(fieldDesc).Float()
 		return strconv.FormatFloat(val, 'f', -1, 64), nil
 	case protoreflect.BoolKind:
 		return fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool()), nil
 	case protoreflect.EnumKind:
-		// 建议同时返回枚举的字符串值（如果需要可读性），这里保持原逻辑
 		return fmt.Sprintf("%d", int32(reflection.Get(fieldDesc).Enum())), nil
 	case protoreflect.BytesKind:
 		return base64.StdEncoding.EncodeToString(reflection.Get(fieldDesc).Bytes()), nil
 	case protoreflect.MessageKind:
 		if reflection.Has(fieldDesc) {
-			subMsg := reflection.Get(fieldDesc).Message()
-			data, err := proto.Marshal(subMsg.Interface())
+			subMsg := reflection.Get(fieldDesc).Message().Interface()
+			data, err := proto.Marshal(subMsg)
 			if err != nil {
 				return "", fmt.Errorf("marshal sub-message field %s: %w", fieldDesc.Name(), err)
 			}
-			return string(data), nil
+			return base64.StdEncoding.EncodeToString(data), nil
 		}
 		return "", nil
 	default:
@@ -241,7 +234,7 @@ func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldD
 	}
 }
 
-// 反序列化字段（增强Timestamp处理）
+// 反序列化字段（完善二进制解码和时间格式容错）
 func ParseFromString(message proto.Message, row []string) error {
 	reflection := message.ProtoReflect()
 	desc := reflection.Descriptor()
@@ -255,12 +248,24 @@ func ParseFromString(message proto.Message, row []string) error {
 		fieldValue := row[i]
 		fieldName := fieldDesc.Name()
 
-		// 特殊处理Timestamp类型
+		// 特殊处理 Timestamp 类型（支持多格式）
 		if fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
 			if fieldValue == "" {
 				continue
 			}
-			t, err := time.Parse("2006-01-02 15:04:05", fieldValue)
+			formats := []string{
+				"2006-01-02 15:04:05.999", // 带毫秒
+				"2006-01-02 15:04:05",     // 不带毫秒
+				"2006-01-02",              // 仅日期
+			}
+			var t time.Time
+			var err error
+			for _, format := range formats {
+				t, err = time.Parse(format, fieldValue)
+				if err == nil {
+					break
+				}
+			}
 			if err != nil {
 				return fmt.Errorf("parse timestamp field %s: %w (value: %s)", fieldName, err, fieldValue)
 			}
@@ -273,13 +278,17 @@ func ParseFromString(message proto.Message, row []string) error {
 			continue
 		}
 
-		// 处理map类型
+		// 处理 map 类型（Base64 解码）
 		if fieldDesc.IsMap() {
 			if fieldValue == "" {
 				continue
 			}
+			data, err := base64.StdEncoding.DecodeString(fieldValue)
+			if err != nil {
+				return fmt.Errorf("decode map field %s: %w (value: %s)", fieldName, err, fieldValue)
+			}
 			mapWrapper := &MapWrapper{}
-			if err := proto.Unmarshal([]byte(fieldValue), mapWrapper); err != nil {
+			if err := proto.Unmarshal(data, mapWrapper); err != nil {
 				return fmt.Errorf("parse map field %s: %w (value: %s)", fieldName, err, fieldValue)
 			}
 			mapVal := reflection.Mutable(fieldDesc).Map()
@@ -290,13 +299,17 @@ func ParseFromString(message proto.Message, row []string) error {
 			continue
 		}
 
-		// 处理list类型
+		// 处理 list 类型（Base64 解码）
 		if fieldDesc.IsList() {
 			if fieldValue == "" {
 				continue
 			}
+			data, err := base64.StdEncoding.DecodeString(fieldValue)
+			if err != nil {
+				return fmt.Errorf("decode list field %s: %w (value: %s)", fieldName, err, fieldValue)
+			}
 			listWrapper := &ListWrapper{}
-			if err := proto.Unmarshal([]byte(fieldValue), listWrapper); err != nil {
+			if err := proto.Unmarshal(data, listWrapper); err != nil {
 				return fmt.Errorf("parse list field %s: %w (value: %s)", fieldName, err, fieldValue)
 			}
 			listVal := reflection.Mutable(fieldDesc).List()
@@ -382,8 +395,12 @@ func ParseFromString(message proto.Message, row []string) error {
 			}
 			reflection.Set(fieldDesc, protoreflect.ValueOfBytes(data))
 		case protoreflect.MessageKind:
+			data, err := base64.StdEncoding.DecodeString(row[i])
+			if err != nil {
+				return fmt.Errorf("decode sub-message field %s: %w", fieldName, err)
+			}
 			subMsg := reflection.Mutable(fieldDesc).Message()
-			if err := proto.Unmarshal([]byte(row[i]), subMsg.Interface()); err != nil {
+			if err := proto.Unmarshal(data, subMsg.Interface()); err != nil {
 				return fmt.Errorf("unmarshal sub-message field %s: %w (value: %s)", fieldName, err, row[i])
 			}
 		default:
