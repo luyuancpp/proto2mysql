@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"github.com/go-sql-driver/mysql"
-	"github.com/luyuancpp/dbprotooption"
+	"github.com/luyuancpp/protooption"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"log"
@@ -41,7 +41,7 @@ func GetMysqlConfig() *mysql.Config {
 // TestCreateTable 测试创建表
 func TestCreateTable(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	testTable := &dbprotooption.GolangTest{}
+	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
 	mysqlConfig := GetMysqlConfig()
@@ -80,7 +80,7 @@ func TestCreateTable(t *testing.T) {
 // TestAlterTable 测试修改表字段
 func TestAlterTable(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	testTable := &dbprotooption.GolangTest{}
+	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
 	mysqlConfig := GetMysqlConfig()
@@ -120,23 +120,23 @@ func TestAlterTable(t *testing.T) {
 // TestLoadSave 测试单条数据存/取
 func TestLoadSave(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	pbSave := &dbprotooption.GolangTest{
+	pbSave := &messageoption.GolangTest{
 		Id:      1,
 		GroupId: 1,
 		Ip:      "127.0.0.1",
 		Port:    3306,
-		Player: &dbprotooption.Player{
+		Player: &messageoption.Player{
 			PlayerId: 111,
 			// 修复：特殊字符用双反斜杠转义
 			Name: "foo\\\\0bar,foo\\\\nbar,foo\\\\rbar,foo\\\\Zbar,foo\\\\\"bar,foo\\\\\\\\bar,foo\\\\'bar",
 		},
 	}
-	pbSave1 := &dbprotooption.GolangTest{
+	pbSave1 := &messageoption.GolangTest{
 		Id:      2,
 		GroupId: 1,
 		Ip:      "127.0.0.1",
 		Port:    3306,
-		Player: &dbprotooption.Player{
+		Player: &messageoption.Player{
 			PlayerId: 111,
 			// 修复：特殊字符用双反斜杠转义
 			Name: "foo\\\\0bar,foo\\\\nbar,foo\\\\rbar,foo\\\\Zbar,foo\\\\\"bar,foo\\\\\\\\bar,foo\\\\'bar",
@@ -181,7 +181,7 @@ func TestLoadSave(t *testing.T) {
 	}
 
 	// 验证数据
-	pbLoad := &dbprotooption.GolangTest{}
+	pbLoad := &messageoption.GolangTest{}
 	if err := pbMySqlDB.FindOneByKV(pbLoad, "id", "1"); err != nil {
 		t.Fatalf("读取id=1的数据失败: %v", err)
 	}
@@ -191,7 +191,7 @@ func TestLoadSave(t *testing.T) {
 		t.Logf("实际: %s", pbLoad.String())
 	}
 
-	pbLoad1 := &dbprotooption.GolangTest{}
+	pbLoad1 := &messageoption.GolangTest{}
 	if err := pbMySqlDB.FindOneByKV(pbLoad1, "id", "2"); err != nil {
 		t.Fatalf("读取id=2的数据失败: %v", err)
 	}
@@ -203,23 +203,23 @@ func TestLoadSave(t *testing.T) {
 // TestFindInsert 测试INSERT ON DUPLICATE KEY UPDATE
 func TestFindInsert(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	pbSave := &dbprotooption.GolangTest{
+	pbSave := &messageoption.GolangTest{
 		Id:      1,
 		GroupId: 1,
 		Ip:      "127.0.0.1",
 		Port:    3306,
-		Player: &dbprotooption.Player{
+		Player: &messageoption.Player{
 			PlayerId: 111,
 			// 修复：特殊字符用双反斜杠转义
 			Name: "foo\\\\0bar,foo\\\\nbar,foo\\\\rbar,foo\\\\Zbar,foo\\\\\"bar,foo\\\\\\\\bar,foo\\\\'bar",
 		},
 	}
-	pbSave1 := &dbprotooption.GolangTest{
+	pbSave1 := &messageoption.GolangTest{
 		Id:      2,
 		GroupId: 1,
 		Ip:      "127.0.0.1",
 		Port:    3306,
-		Player: &dbprotooption.Player{
+		Player: &messageoption.Player{
 			PlayerId: 111,
 			// 修复：特殊字符用双反斜杠转义
 			Name: "foo\\\\0bar,foo\\\\nbar,foo\\\\rbar,foo\\\\Zbar,foo\\\\\"bar,foo\\\\\\\\bar,foo\\\\'bar",
@@ -264,7 +264,7 @@ func TestFindInsert(t *testing.T) {
 	}
 
 	// 验证数据
-	pbLoad := &dbprotooption.GolangTest{}
+	pbLoad := &messageoption.GolangTest{}
 	if err := pbMySqlDB.FindOneByKV(pbLoad, "id", "1"); err != nil {
 		t.Fatalf("读取id=1失败: %v", err)
 	}
@@ -276,12 +276,12 @@ func TestFindInsert(t *testing.T) {
 // TestLoadByWhereCase 测试按条件查询
 func TestLoadByWhereCase(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	pbSave := &dbprotooption.GolangTest{
+	pbSave := &messageoption.GolangTest{
 		Id:      1,
 		GroupId: 1,
 		Ip:      "127.0.0.1",
 		Port:    3306,
-		Player: &dbprotooption.Player{
+		Player: &messageoption.Player{
 			PlayerId: 111,
 			// 修复：特殊字符用双反斜杠转义
 			Name: "foo\\\\0bar,foo\\\\nbar,foo\\\\rbar,foo\\\\Zbar,foo\\\\\"bar,foo\\\\\\\\bar,foo\\\\'bar",
@@ -323,7 +323,7 @@ func TestLoadByWhereCase(t *testing.T) {
 	}
 
 	// 按条件查询（WHERE子句无需加"where"前缀）
-	pbLoad := &dbprotooption.GolangTest{}
+	pbLoad := &messageoption.GolangTest{}
 	if err := pbMySqlDB.FindOneByWhereClause(pbLoad, "id=1"); err != nil {
 		t.Fatalf("执行FindOneByWhereClause失败: %v", err)
 	}
@@ -337,7 +337,7 @@ func TestLoadByWhereCase(t *testing.T) {
 // TestSpecialCharacterEscape 测试特殊字符存/取一致性
 func TestSpecialCharacterEscape(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	testTable := &dbprotooption.GolangTest{}
+	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
 	mysqlConfig := GetMysqlConfig()
@@ -384,12 +384,12 @@ func TestSpecialCharacterEscape(t *testing.T) {
 	for _, sc := range specialChars {
 		testID++
 		// 构造测试数据
-		pbSave := &dbprotooption.GolangTest{
+		pbSave := &messageoption.GolangTest{
 			Id:      testID,
 			GroupId: 999,
 			Ip:      "192.168.1.100",
 			Port:    3306,
-			Player: &dbprotooption.Player{
+			Player: &messageoption.Player{
 				PlayerId: uint64(testID),
 				Name:     fmt.Sprintf("Test_%s: %s", sc.name, sc.value),
 			},
@@ -407,7 +407,7 @@ func TestSpecialCharacterEscape(t *testing.T) {
 		}
 
 		// 读取数据
-		pbLoad := &dbprotooption.GolangTest{}
+		pbLoad := &messageoption.GolangTest{}
 		if err := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
 			t.Errorf("读取[%s]数据失败: %v", sc.name, err)
 			continue
@@ -427,7 +427,7 @@ func TestSpecialCharacterEscape(t *testing.T) {
 // TestStringWithSpaces 测试空格处理
 func TestStringWithSpaces(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	testTable := &dbprotooption.GolangTest{}
+	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
 	mysqlConfig := GetMysqlConfig()
@@ -474,12 +474,12 @@ func TestStringWithSpaces(t *testing.T) {
 		}
 
 		// 保存数据
-		pbSave := &dbprotooption.GolangTest{
+		pbSave := &messageoption.GolangTest{
 			Id:      uint32(tc.id),
 			GroupId: 200,
 			Ip:      "192.168.2.1",
 			Port:    3306,
-			Player: &dbprotooption.Player{
+			Player: &messageoption.Player{
 				PlayerId: uint64(tc.id),
 				Name:     tc.name,
 			},
@@ -490,7 +490,7 @@ func TestStringWithSpaces(t *testing.T) {
 		}
 
 		// 读取数据
-		pbLoad := &dbprotooption.GolangTest{}
+		pbLoad := &messageoption.GolangTest{}
 		if err := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatInt(int64(tc.id), 10)); err != nil {
 			t.Errorf("读取[%s]数据失败: %v", tc.desc, err)
 			continue
@@ -510,7 +510,7 @@ func TestStringWithSpaces(t *testing.T) {
 // TestLoadSaveListWhereCase 测试批量查询
 func TestLoadSaveListWhereCase(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	testTable := &dbprotooption.GolangTest{}
+	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
 	mysqlConfig := GetMysqlConfig()
@@ -537,14 +537,14 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 	}
 
 	// 构造预期数据
-	expectedList := &dbprotooption.GolangTestList{
-		TestList: []*dbprotooption.GolangTest{
+	expectedList := &messageoption.GolangTestList{
+		TestList: []*messageoption.GolangTest{
 			{
 				Id:      101,
 				GroupId: 1,
 				Ip:      "127.0.0.1",
 				Port:    3306,
-				Player: &dbprotooption.Player{
+				Player: &messageoption.Player{
 					PlayerId: 1001,
 					Name:     "BatchTest_1",
 				},
@@ -554,7 +554,7 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 				GroupId: 1,
 				Ip:      "127.0.0.1",
 				Port:    3306,
-				Player: &dbprotooption.Player{
+				Player: &messageoption.Player{
 					PlayerId: 1002,
 					Name:     "BatchTest_2",
 				},
@@ -575,7 +575,7 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 	}
 
 	// 批量查询
-	actualList := &dbprotooption.GolangTestList{}
+	actualList := &messageoption.GolangTestList{}
 	if err := pbMySqlDB.FindAllByWhereClause(actualList, "group_id=1"); err != nil {
 		t.Fatalf("批量查询失败: %v", err)
 	}
@@ -607,7 +607,7 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 // TestSpecialCharacterEscape 测试特殊字符存/取一致性（新增12种场景，覆盖全类型）
 func TestSpecialCharacterEscape1(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	testTable := &dbprotooption.GolangTest{}
+	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
 	mysqlConfig := GetMysqlConfig()
@@ -676,12 +676,12 @@ func TestSpecialCharacterEscape1(t *testing.T) {
 	for _, sc := range specialChars {
 		testID++
 		// 1. 构造测试数据（包含场景名称，便于问题定位）
-		pbSave := &dbprotooption.GolangTest{
+		pbSave := &messageoption.GolangTest{
 			Id:      testID,
 			GroupId: 999, // 固定GroupId，便于后续批量清理
 			Ip:      "192.168.1.100",
 			Port:    3306,
-			Player: &dbprotooption.Player{
+			Player: &messageoption.Player{
 				PlayerId: uint64(testID),
 				Name:     fmt.Sprintf("[%s]%s", sc.name, sc.value), // 前缀标记场景，便于日志排查
 			},
@@ -701,7 +701,7 @@ func TestSpecialCharacterEscape1(t *testing.T) {
 		}
 
 		// 4. 读取数据（验证读取过程无错误）
-		pbLoad := &dbprotooption.GolangTest{}
+		pbLoad := &messageoption.GolangTest{}
 		findErr := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10))
 		if findErr != nil {
 			t.Errorf("读取[%s]失败: %v\n场景说明: %s\n原始值: %q",
@@ -735,7 +735,7 @@ func TestSpecialCharacterEscape1(t *testing.T) {
 // TestFullRangeSpecialCharacters 覆盖ASCII全范围+Unicode扩展的所有特殊字符测试
 func TestFullRangeSpecialCharacters(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	testTable := &dbprotooption.GolangTest{}
+	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
 	mysqlConfig := GetMysqlConfig()
@@ -841,12 +841,12 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 		testID++
 		// 控制字符无法直接打印，用「ASCII:XX」标记，值用转义序列表示
 		escapedVal := fmt.Sprintf("ASCII_%d(\\x%02x)", ctrl.code, ctrl.code)
-		pbSave := &dbprotooption.GolangTest{
+		pbSave := &messageoption.GolangTest{
 			Id:      testID,
 			GroupId: 999,
 			Ip:      "192.168.1.100",
 			Port:    3306,
-			Player: &dbprotooption.Player{
+			Player: &messageoption.Player{
 				PlayerId: uint64(testID),
 				Name:     fmt.Sprintf("[%s]%s", ctrl.name, escapedVal),
 			},
@@ -867,7 +867,7 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 		}
 
 		// 读取验证
-		pbLoad := &dbprotooption.GolangTest{}
+		pbLoad := &messageoption.GolangTest{}
 		if err := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
 			t.Errorf("读取[%s]失败: %v", ctrl.name, err)
 			continue
@@ -888,12 +888,12 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 		testID++
 		// 构造包含当前特殊字符的字符串（混合字母+特殊字符，模拟真实场景）
 		testStr := fmt.Sprintf("[%s]测试字符串: a%sb%sc%sd", spec.name, string(spec.char), string(spec.char), string(spec.char))
-		pbSave := &dbprotooption.GolangTest{
+		pbSave := &messageoption.GolangTest{
 			Id:      testID,
 			GroupId: 999,
 			Ip:      "192.168.1.100",
 			Port:    3306,
-			Player: &dbprotooption.Player{
+			Player: &messageoption.Player{
 				PlayerId: uint64(testID),
 				Name:     testStr,
 			},
@@ -911,7 +911,7 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 		}
 
 		// 读取验证
-		pbLoad := &dbprotooption.GolangTest{}
+		pbLoad := &messageoption.GolangTest{}
 		if err := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
 			t.Errorf("读取[%s(%c)]失败: %v", spec.name, spec.char, err)
 			continue
@@ -930,12 +930,12 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 	t.Log("\n=== 开始测试Unicode扩展特殊字符 ===")
 	for _, unicode := range unicodeSpecialChars {
 		testID++
-		pbSave := &dbprotooption.GolangTest{
+		pbSave := &messageoption.GolangTest{
 			Id:      testID,
 			GroupId: 999,
 			Ip:      "192.168.1.100",
 			Port:    3306,
-			Player: &dbprotooption.Player{
+			Player: &messageoption.Player{
 				PlayerId: uint64(testID),
 				Name:     fmt.Sprintf("[%s]%s（说明: %s）", unicode.name, unicode.value, unicode.desc),
 			},
@@ -953,7 +953,7 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 		}
 
 		// 读取验证
-		pbLoad := &dbprotooption.GolangTest{}
+		pbLoad := &messageoption.GolangTest{}
 		if err := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
 			t.Errorf("读取[%s]失败: %v\n字符: %q", unicode.name, err, unicode.value)
 			continue
@@ -981,7 +981,7 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 func TestNullValueHandling(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
 	// 构造包含空值的测试数据
-	pbSave := &dbprotooption.GolangTest{
+	pbSave := &messageoption.GolangTest{
 		Id:      3,
 		GroupId: 0,  // 零值
 		Ip:      "", // 空字符串
@@ -1014,7 +1014,7 @@ func TestNullValueHandling(t *testing.T) {
 	}
 
 	// 验证读取结果
-	pbLoad := &dbprotooption.GolangTest{}
+	pbLoad := &messageoption.GolangTest{}
 	if err := pbMySqlDB.FindOneByKV(pbLoad, "id", "3"); err != nil {
 		t.Fatalf("读取空值数据失败: %v", err)
 	}
@@ -1036,12 +1036,12 @@ func TestLargeFieldStorage(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
 	// 生成10KB的大字符串
 	largeStr := strings.Repeat("a", 1024*10)
-	pbSave := &dbprotooption.GolangTest{
+	pbSave := &messageoption.GolangTest{
 		Id:      4,
 		GroupId: 2,
 		Ip:      largeStr, // 大字段
 		Port:    8080,
-		Player: &dbprotooption.Player{
+		Player: &messageoption.Player{
 			PlayerId: 222,
 			Name:     largeStr, // 嵌套消息中的大字段
 		},
@@ -1072,7 +1072,7 @@ func TestLargeFieldStorage(t *testing.T) {
 	}
 
 	// 验证读取结果
-	pbLoad := &dbprotooption.GolangTest{}
+	pbLoad := &messageoption.GolangTest{}
 	if err := pbMySqlDB.FindOneByKV(pbLoad, "id", "4"); err != nil {
 		t.Fatalf("读取大字段失败: %v", err)
 	}
@@ -1089,7 +1089,7 @@ func TestLargeFieldStorage(t *testing.T) {
 // TestBatchOperations 测试批量插入和查询
 func TestBatchOperations(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	testTable := &dbprotooption.GolangTest{}
+	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
 	mysqlConfig := GetMysqlConfig()
@@ -1113,7 +1113,7 @@ func TestBatchOperations(t *testing.T) {
 	// 批量插入10条数据
 	batchSize := 10
 	for i := 0; i < batchSize; i++ {
-		pb := &dbprotooption.GolangTest{
+		pb := &messageoption.GolangTest{
 			Id:      uint32(100 + i),
 			GroupId: 3,
 			Ip:      fmt.Sprintf("192.168.1.%d", i),
@@ -1125,7 +1125,7 @@ func TestBatchOperations(t *testing.T) {
 	}
 
 	// 批量查询
-	list := &dbprotooption.GolangTestList{} // 假设存在包含repeated GolangTest的消息
+	list := &messageoption.GolangTestList{} // 假设存在包含repeated GolangTest的消息
 	if err := pbMySqlDB.FindAllByWhereWithArgs(
 		list,
 		"group_id = ?",
@@ -1143,7 +1143,7 @@ func TestBatchOperations(t *testing.T) {
 // TestUpdateFieldType 测试字段类型自动更新（修复版）
 func TestUpdateFieldType(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
-	testTable := &dbprotooption.GolangTest{}
+	testTable := &messageoption.GolangTest{}
 	tableName := GetTableName(testTable)
 	pbMySqlDB.RegisterTable(testTable)
 
@@ -1254,50 +1254,50 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 
 	// 2. 准备4张表的测试数据（原始表+3张新增表）
 	// 原始表数据
-	testData := &dbprotooption.GolangTest{
+	testData := &messageoption.GolangTest{
 		Id:      100,
 		GroupId: 1,
 		Ip:      "192.168.0.100",
 		Port:    3306,
-		Player: &dbprotooption.Player{
+		Player: &messageoption.Player{
 			PlayerId: 10000,
 			Name:     "OriginalTest",
 		},
 	}
 	// 新增表1数据
-	testData1 := &dbprotooption.GolangTest1{
+	testData1 := &messageoption.GolangTest1{
 		Id:      101,
 		GroupId: 1,
 		Ip:      "192.168.0.101",
 		Port:    3306,
-		Player: &dbprotooption.Player{
+		Player: &messageoption.Player{
 			PlayerId: 10001,
 			Name:     "Test1",
 		},
 		ExtraInfo: "额外信息1", // 新增字段
 	}
 	// 新增表2数据（port为uint64）
-	testData2 := &dbprotooption.GolangTest2{
+	testData2 := &messageoption.GolangTest2{
 		Id:      102,
 		GroupId: 1,
 		Ip:      "192.168.0.102",
 		Port:    65536, // 超过uint32的端口值
-		Player: &dbprotooption.Player{
+		Player: &messageoption.Player{
 			PlayerId: 10002,
 			Name:     "Test2",
 		},
 	}
 	// 新增表3数据（多一个嵌套player）
-	testData3 := &dbprotooption.GolangTest3{
+	testData3 := &messageoption.GolangTest3{
 		Id:      103,
 		GroupId: 1,
 		Ip:      "192.168.0.103",
 		Port:    3306,
-		Player: &dbprotooption.Player{
+		Player: &messageoption.Player{
 			PlayerId: 10003,
 			Name:     "Test3Main",
 		},
-		ExtraPlayer: &dbprotooption.Player{ // 新增嵌套字段
+		ExtraPlayer: &messageoption.Player{ // 新增嵌套字段
 			PlayerId: 10004,
 			Name:     "Test3Extra",
 		},
@@ -1353,22 +1353,22 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 	// 6. 准备批量查询参数（跨4张表）
 	queries := []MultiQuery{
 		{
-			Message:     &dbprotooption.GolangTest{}, // 原始表
+			Message:     &messageoption.GolangTest{}, // 原始表
 			WhereClause: "id = ? AND group_id = ?",
 			WhereArgs:   []interface{}{testData.Id, testData.GroupId},
 		},
 		{
-			Message:     &dbprotooption.GolangTest1{}, // 新增表1
+			Message:     &messageoption.GolangTest1{}, // 新增表1
 			WhereClause: "id = ? AND extra_info = ?",  // 查询新增字段
 			WhereArgs:   []interface{}{testData1.Id, testData1.ExtraInfo},
 		},
 		{
-			Message:     &dbprotooption.GolangTest2{}, // 新增表2
+			Message:     &messageoption.GolangTest2{}, // 新增表2
 			WhereClause: "id = ? AND port = ?",        // 查询uint64字段
 			WhereArgs:   []interface{}{testData2.Id, testData2.Port},
 		},
 		{
-			Message:     &dbprotooption.GolangTest3{}, // 新增表3
+			Message:     &messageoption.GolangTest3{}, // 新增表3
 			WhereClause: "id = ? AND player_id = ?",   // 查询新增嵌套字段
 			WhereArgs:   []interface{}{testData3.Id, testData3.ExtraPlayer.PlayerId},
 		},
@@ -1381,7 +1381,7 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 
 	// 8. 验证查询结果
 	// 验证原始表
-	result := queries[0].Message.(*dbprotooption.GolangTest)
+	result := queries[0].Message.(*messageoption.GolangTest)
 	if !proto.Equal(testData, result) {
 		t.Error("golang_test查询结果不一致")
 		t.Logf("预期: %s", testData.String())
@@ -1389,7 +1389,7 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 	}
 
 	// 验证新增表1
-	result1 := queries[1].Message.(*dbprotooption.GolangTest1)
+	result1 := queries[1].Message.(*messageoption.GolangTest1)
 	if !proto.Equal(testData1, result1) {
 		t.Error("golang_test1查询结果不一致")
 		t.Logf("预期: %s", testData1.String())
@@ -1397,7 +1397,7 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 	}
 
 	// 验证新增表2（注意port是uint64）
-	result2 := queries[2].Message.(*dbprotooption.GolangTest2)
+	result2 := queries[2].Message.(*messageoption.GolangTest2)
 	if !proto.Equal(testData2, result2) {
 		t.Error("golang_test2查询结果不一致")
 		t.Logf("预期: %s", testData2.String())
@@ -1405,7 +1405,7 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 	}
 
 	// 验证新增表3（注意嵌套字段extra_player）
-	result3 := queries[3].Message.(*dbprotooption.GolangTest3)
+	result3 := queries[3].Message.(*messageoption.GolangTest3)
 	if !proto.Equal(testData3, result3) {
 		t.Error("golang_test3查询结果不一致")
 		t.Logf("预期: %s", testData3.String())
@@ -1415,7 +1415,7 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 	// 9. 测试异常场景（表2查询不存在的数据）
 	invalidQueries := []MultiQuery{
 		{
-			Message:     &dbprotooption.GolangTest2{},
+			Message:     &messageoption.GolangTest2{},
 			WhereClause: "id = ?",
 			WhereArgs:   []interface{}{9999}, // 不存在的ID
 		},
@@ -1456,7 +1456,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 	}
 
 	// 2. 注册测试表（golang_test）
-	testTable := &dbprotooption.GolangTest{}
+	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(
 		testTable,
 		WithPrimaryKey("id"),
@@ -1473,21 +1473,21 @@ func TestFindMultiInterfaces(t *testing.T) {
 	_, _ = db.Exec(cleanSQL, 1000) // 清理player_id=1000的旧数据
 
 	// 4. 插入测试数据（3条相同player_id的数据，用于测试多条结果）
-	testData1 := &dbprotooption.GolangTest{
+	testData1 := &messageoption.GolangTest{
 		Id:       1001,
 		PlayerId: 1000, // 关键：相同的player_id
 		Ip:       "192.168.1.101",
 		Port:     3306,
 		GroupId:  10,
 	}
-	testData2 := &dbprotooption.GolangTest{
+	testData2 := &messageoption.GolangTest{
 		Id:       1002,
 		PlayerId: 1000,
 		Ip:       "192.168.1.102",
 		Port:     3307,
 		GroupId:  10,
 	}
-	testData3 := &dbprotooption.GolangTest{
+	testData3 := &messageoption.GolangTest{
 		Id:       1003,
 		PlayerId: 1000,
 		Ip:       "192.168.1.103",
@@ -1495,7 +1495,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 		GroupId:  20, // 不同的groupId，用于复杂条件查询
 	}
 	// 插入一条不相关数据（用于验证过滤效果）
-	unrelatedData := &dbprotooption.GolangTest{
+	unrelatedData := &messageoption.GolangTest{
 		Id:       2001,
 		PlayerId: 2000, // 不同的player_id
 		Ip:       "192.168.2.101",
@@ -1511,7 +1511,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 
 	// 5. 测试 FindMultiByKV（键值对查询多条结果）
 	t.Run("FindMultiByKV", func(t *testing.T) {
-		var resultList dbprotooption.GolangTestList
+		var resultList messageoption.GolangTestList
 		err := pbMySqlDB.FindMultiByKV(&resultList, "player_id", uint64(1000))
 		if err != nil {
 			t.Fatalf("FindMultiByKV查询失败: %v", err)
@@ -1535,7 +1535,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 
 	// 6. 测试 FindMultiByWhereWithArgs（参数化条件查询多条结果）
 	t.Run("FindMultiByWhereWithArgs", func(t *testing.T) {
-		var resultList dbprotooption.GolangTestList
+		var resultList messageoption.GolangTestList
 		// 复杂条件：player_id=1000 且 group_id=10
 		err := pbMySqlDB.FindMultiByWhereWithArgs(
 			&resultList,
@@ -1564,7 +1564,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 
 	// 7. 测试 FindMultiByWhereClause（非参数化条件查询多条结果）
 	t.Run("FindMultiByWhereClause", func(t *testing.T) {
-		var resultList dbprotooption.GolangTestList
+		var resultList messageoption.GolangTestList
 		// 固定条件（内部使用，无用户输入）
 		err := pbMySqlDB.FindMultiByWhereClause(
 			&resultList,
