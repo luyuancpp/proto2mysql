@@ -4,18 +4,19 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	_ "github.com/go-sql-driver/mysql"
-	"github.com/luyuancpp/proto2mysql/pbconv"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/reflect/protoregistry"
-	"google.golang.org/protobuf/types/known/timestamppb"
 	"log"
 	"reflect"
 	"regexp"
 	"strconv"
 	"strings"
 	"sync"
+
+	_ "github.com/go-sql-driver/mysql"
+	"github.com/luyuancpp/proto2mysql/pbconv"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
+	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // 常量定义
@@ -81,20 +82,35 @@ type MessageTable struct {
 	columnsMu     sync.RWMutex // 保护cachedColumns的并发安全
 }
 
+func (m *MessageTable) isNullableField(fieldName string) bool {
+	for _, nullable := range m.nullableFields {
+		if nullable == fieldName {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *MessageTable) isAutoIncrementField(fieldName string) bool {
+	return m.autoIncreaseKey == fieldName
+}
+
+func buildPlaceholders(count int) string {
+	if count <= 0 {
+		return ""
+	}
+	return strings.TrimSuffix(strings.Repeat("?, ", count), ", ")
+}
+
 // getMySQLFieldType 获取字段对应的MySQL目标类型（支持Timestamp特殊处理）
 func (m *MessageTable) getMySQLFieldType(fieldDesc protoreflect.FieldDescriptor) string {
 	// 特殊处理Timestamp类型
 	if fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
-		baseType := "DATETIME NOT NULL"
-		// 检查是否为 nullable 字段
 		fieldName := string(fieldDesc.Name())
-		for _, nullable := range m.nullableFields {
-			if nullable == fieldName {
-				baseType = "DATETIME"
-				break
-			}
+		if m.isNullableField(fieldName) {
+			return "DATETIME"
 		}
-		return baseType
+		return "DATETIME NOT NULL"
 	}
 
 	if fieldDesc.IsMap() || fieldDesc.IsList() {
@@ -108,15 +124,12 @@ func (m *MessageTable) getMySQLFieldType(fieldDesc protoreflect.FieldDescriptor)
 	}
 
 	// 处理 nullable 字段
-	for _, nullable := range m.nullableFields {
-		if nullable == fieldName {
-			baseType = strings.ReplaceAll(baseType, " NOT NULL", "")
-			break
-		}
+	if m.isNullableField(fieldName) {
+		baseType = strings.ReplaceAll(baseType, " NOT NULL", "")
 	}
 
 	// 处理自增字段：移除默认值（修复Error 1067）
-	if m.autoIncreaseKey == fieldName {
+	if m.isAutoIncrementField(fieldName) {
 		// 移除DEFAULT 0（避免自增字段默认值冲突）
 		baseType = strings.ReplaceAll(baseType, " DEFAULT 0", "")
 		baseType += " AUTO_INCREMENT"
@@ -279,10 +292,6 @@ func (m *MessageTable) GetCreateTableSQL() string {
 		escapedName := escapeMySQLName(fieldName)
 
 		fieldType := m.getMySQLFieldType(field)
-
-		if m.autoIncreaseKey == fieldName {
-			fieldType += " AUTO_INCREMENT"
-		}
 
 		fields = append(fields, fmt.Sprintf("  %s %s", escapedName, fieldType))
 	}
@@ -659,7 +668,7 @@ func (m *MessageTable) GetBatchInsertSQLWithArgs(messages []proto.Message) (*Sql
 			args = append(args, val)
 		}
 		allArgs = append(allArgs, args...)
-		valueGroups = append(valueGroups, strings.Repeat("?, ", fieldCount)[:len(strings.Repeat("?, ", fieldCount))-2])
+		valueGroups = append(valueGroups, buildPlaceholders(fieldCount))
 	}
 
 	sql := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
@@ -881,8 +890,7 @@ func (m *MessageTable) GetReplaceSQLWithArgs(message proto.Message) (*SqlWithArg
 		args = append(args, val)
 	}
 
-	placeholders := strings.Repeat("?, ", len(args))
-	placeholders = strings.TrimSuffix(placeholders, ", ")
+	placeholders := buildPlaceholders(len(args))
 	sqlStmt := fmt.Sprintf("%s%s)", m.replaceSQL, placeholders)
 
 	return &SqlWithArgs{Sql: sqlStmt, Args: args}, nil
@@ -1002,8 +1010,7 @@ func (m *MessageTable) Init() {
 	m.selectAllSQLWithoutSemicolon = m.selectFieldsSQL + " "
 
 	fieldCount := strings.Count(m.fieldsListSQL, ",") + 1
-	placeholders := strings.Repeat("?, ", fieldCount)
-	placeholders = strings.TrimSuffix(placeholders, ", ")
+	placeholders := buildPlaceholders(fieldCount)
 	m.insertSQLTemplate = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 		escapeMySQLName(m.tableName),
 		m.fieldsListSQL,
@@ -1139,21 +1146,9 @@ func (p *PbMysqlDB) FindAll(message proto.Message) error {
 // FindAllByWhereWithArgs 执行参数化的自定义WHERE查询（批量数据）
 func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
 	reflectionParent := message.ProtoReflect()
-	md := reflectionParent.Descriptor()
-	fieldDescriptors := md.Fields()
-
-	var listField protoreflect.FieldDescriptor
-	for i := 0; i < fieldDescriptors.Len(); i++ {
-		fd := fieldDescriptors.Get(i)
-		if fd.IsList() {
-			if listField != nil {
-				return ErrMultipleRepeated
-			}
-			listField = fd
-		}
-	}
-	if listField == nil {
-		return ErrNoRepeatedField
+	listField, err := getSingleRepeatedField(message)
+	if err != nil {
+		return err
 	}
 
 	tableName := string(listField.Message().Name())
@@ -1269,99 +1264,62 @@ func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause stri
 	return nil
 }
 
-// getMessageFields 获取 protobuf 消息中所有字段的描述符
-func getMessageFields(msg proto.Message) []protoreflect.FieldDescriptor {
-	if msg == nil {
-		return nil
-	}
-	msgReflect := msg.ProtoReflect()
-	fields := msgReflect.Descriptor().Fields()
-	result := make([]protoreflect.FieldDescriptor, 0, fields.Len())
-
-	// 遍历所有字段，收集描述符
-	for i := 0; i < fields.Len(); i++ {
-		result = append(result, fields.Get(i))
-	}
-	return result
-}
-
-func GetRepeatedFieldElementType(list proto.Message) (reflect.Type, error) {
+func getSingleRepeatedField(list proto.Message) (protoreflect.FieldDescriptor, error) {
 	if list == nil {
 		return nil, errors.New("list message cannot be nil")
 	}
 
-	// 1. 查找唯一的 repeated 字段
-	listReflect := list.ProtoReflect()
-	listDesc := listReflect.Descriptor()
-	var elementField protoreflect.FieldDescriptor
+	fields := list.ProtoReflect().Descriptor().Fields()
+	var repeatedField protoreflect.FieldDescriptor
 
-	fields := listDesc.Fields()
 	for i := 0; i < fields.Len(); i++ {
 		fd := fields.Get(i)
-		if fd.IsList() { // 找到 repeated 字段
-			if elementField != nil {
-				return nil, ErrMultipleRepeated
-			}
-			elementField = fd
+		if !fd.IsList() {
+			continue
 		}
+		if repeatedField != nil {
+			return nil, ErrMultipleRepeated
+		}
+		repeatedField = fd
 	}
-	if elementField == nil {
+
+	if repeatedField == nil {
 		return nil, ErrNoRepeatedField
 	}
 
-	// 2. 验证元素类型是 message
-	elementDesc := elementField.Message()
-	if elementDesc == nil {
-		return nil, fmt.Errorf("repeated field %s is not a message type", elementField.Name())
+	if repeatedField.Message() == nil {
+		return nil, fmt.Errorf("repeated field %s is not a message type", repeatedField.Name())
 	}
 
-	// 3. 通过全局类型注册表查找消息类型（替换 proto.MessageType）
+	return repeatedField, nil
+}
+
+func GetRepeatedFieldElementType(list proto.Message) (reflect.Type, error) {
+	elementField, err := getSingleRepeatedField(list)
+	if err != nil {
+		return nil, err
+	}
+
+	elementDesc := elementField.Message()
+
+	// 通过全局类型注册表查找消息类型（替换 proto.MessageType）
 	elemType, err := protoregistry.GlobalTypes.FindMessageByName(elementDesc.FullName())
 	if err != nil {
 		return nil, fmt.Errorf("failed to find message type %s: %w", elementDesc.FullName(), err)
 	}
 
-	// 4. 创建实例并返回其反射类型（*T）
+	// 创建实例并返回其反射类型（*T）
 	elemInstance := elemType.New().Interface()
 	return reflect.TypeOf(elemInstance), nil
 }
 
 func GetElementTableName(list proto.Message) (string, error) {
-	if list == nil {
-		return "", errors.New("list message cannot be nil")
+	elementField, err := getSingleRepeatedField(list)
+	if err != nil {
+		return "", err
 	}
 
-	// 获取列表消息的反射对象
-	listReflect := list.ProtoReflect()
-	listDesc := listReflect.Descriptor()
-
-	// 查找唯一的repeated字段
-	var elementField protoreflect.FieldDescriptor
-	fields := listDesc.Fields()
-	for i := 0; i < fields.Len(); i++ {
-		fd := fields.Get(i)
-		if fd.IsList() { // 找到repeated字段
-			if elementField != nil {
-				// 存在多个repeated字段，无法确定目标元素类型
-				return "", ErrMultipleRepeated
-			}
-			elementField = fd
-		}
-	}
-
-	// 检查是否找到repeated字段
-	if elementField == nil {
-		return "", ErrNoRepeatedField
-	}
-
-	// 获取repeated字段的元素类型（必须是message类型）
-	elementDesc := elementField.Message()
-	if elementDesc == nil {
-		return "", fmt.Errorf("repeated field %s is not a message type", elementField.Name())
-	}
-
-	// 返回元素类型对应的表名（即元素message的名称）
-	return string(elementDesc.Name()), nil
+	return string(elementField.Message().Name()), nil
 }
 
 // FindMultiByWhereWithArgs 执行带参数的批量查询（使用封装的表名获取函数）
@@ -1405,23 +1363,10 @@ func (db *PbMysqlDB) FindMultiByKV(list proto.Message, key string, value interfa
 }
 
 func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause string) error {
-	// 解析列表消息中的 repeated 字段
 	reflectionParent := message.ProtoReflect()
-	md := reflectionParent.Descriptor()
-	fieldDescriptors := md.Fields()
-
-	var listField protoreflect.FieldDescriptor
-	for i := 0; i < fieldDescriptors.Len(); i++ {
-		fd := fieldDescriptors.Get(i)
-		if fd.IsList() {
-			if listField != nil {
-				return ErrMultipleRepeated
-			}
-			listField = fd
-		}
-	}
-	if listField == nil {
-		return ErrNoRepeatedField
+	listField, err := getSingleRepeatedField(message)
+	if err != nil {
+		return err
 	}
 
 	// 获取表名（repeated字段的元素类型对应的表）
@@ -1490,21 +1435,9 @@ func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause st
 // 注意：whereClause 是纯条件字符串（如 "id > 100"，无需包含WHERE）
 func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause string) error {
 	reflectionParent := message.ProtoReflect()
-	md := reflectionParent.Descriptor()
-	fieldDescriptors := md.Fields()
-
-	var listField protoreflect.FieldDescriptor
-	for i := 0; i < fieldDescriptors.Len(); i++ {
-		fd := fieldDescriptors.Get(i)
-		if fd.IsList() {
-			if listField != nil {
-				return ErrMultipleRepeated
-			}
-			listField = fd
-		}
-	}
-	if listField == nil {
-		return ErrNoRepeatedField
+	listField, err := getSingleRepeatedField(message)
+	if err != nil {
+		return err
 	}
 
 	tableName := string(listField.Message().Name())

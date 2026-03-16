@@ -4,11 +4,12 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"strconv"
+	"time"
+
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
 	"google.golang.org/protobuf/types/known/timestamppb"
-	"strconv"
-	"time"
 )
 
 var (
@@ -161,7 +162,10 @@ func ParseFromString(message proto.Message, row []string) error {
 			if err != nil {
 				return fmt.Errorf("marshal timestamp field %s: %w", fieldName, err)
 			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfBytes(data))
+			subMsg := reflection.Mutable(fieldDesc).Message().Interface()
+			if err := proto.Unmarshal(data, subMsg); err != nil {
+				return fmt.Errorf("unmarshal timestamp field %s: %w", fieldName, err)
+			}
 			continue
 		}
 
@@ -209,11 +213,17 @@ func ParseFromString(message proto.Message, row []string) error {
 		// 非集合类型处理
 		if fieldValue == "" {
 			switch fieldDesc.Kind() {
-			case protoreflect.Int32Kind, protoreflect.Int64Kind:
+			case protoreflect.Int32Kind:
+				reflection.Set(fieldDesc, protoreflect.ValueOfInt32(0))
+			case protoreflect.Int64Kind:
 				reflection.Set(fieldDesc, protoreflect.ValueOfInt64(0))
-			case protoreflect.Uint32Kind, protoreflect.Uint64Kind:
+			case protoreflect.Uint32Kind:
+				reflection.Set(fieldDesc, protoreflect.ValueOfUint32(0))
+			case protoreflect.Uint64Kind:
 				reflection.Set(fieldDesc, protoreflect.ValueOfUint64(0))
-			case protoreflect.FloatKind, protoreflect.DoubleKind:
+			case protoreflect.FloatKind:
+				reflection.Set(fieldDesc, protoreflect.ValueOfFloat32(0))
+			case protoreflect.DoubleKind:
 				reflection.Set(fieldDesc, protoreflect.ValueOfFloat64(0))
 			case protoreflect.BoolKind:
 				reflection.Set(fieldDesc, protoreflect.ValueOfBool(false))

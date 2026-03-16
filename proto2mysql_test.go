@@ -4,17 +4,20 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"github.com/go-sql-driver/mysql"
-	"github.com/luyuancpp/protooption"
-	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/reflect/protoreflect"
 	"log"
 	"os"
 	"sort"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/go-sql-driver/mysql"
+	messageoption "github.com/luyuancpp/protooption"
+	"google.golang.org/protobuf/proto"
+	"google.golang.org/protobuf/reflect/protoreflect"
 )
+
+const integrationEnv = "PROTO2MYSQL_INTEGRATION"
 
 // GetMysqlConfig 读取db.json配置
 func GetMysqlConfig() *mysql.Config {
@@ -33,9 +36,53 @@ func GetMysqlConfig() *mysql.Config {
 	decoder := json.NewDecoder(file)
 	jsonConfig := JsonConfig{}
 	if err := decoder.Decode(&jsonConfig); err != nil {
-		log.Fatalf("解析db.json失败: %v", err)
+		log.Printf("解析db.json失败: %v", err)
+		return nil
 	}
 	return NewMysqlConfig(jsonConfig)
+}
+
+func mustOpenTestDB(t *testing.T, pbMySqlDB *PbMysqlDB) *sql.DB {
+	t.Helper()
+
+	if testing.Short() {
+		t.Skip("跳过数据库集成测试: short 模式")
+	}
+
+	if os.Getenv(integrationEnv) != "1" {
+		t.Skip("跳过数据库集成测试: 设置 PROTO2MYSQL_INTEGRATION=1 以启用")
+	}
+
+	mysqlConfig := GetMysqlConfig()
+	if mysqlConfig == nil {
+		t.Fatal("获取MySQL配置失败，请检查db.json文件")
+	}
+
+	conn, err := mysql.NewConnector(mysqlConfig)
+	if err != nil {
+		t.Fatalf("创建MySQL连接器失败: %v", err)
+	}
+
+	db := sql.OpenDB(conn)
+	if err := db.Ping(); err != nil {
+		t.Fatalf("数据库连接失败: %v", err)
+	}
+
+	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
+		t.Fatalf("切换数据库失败: %v", err)
+	}
+
+	return db
+}
+
+func closeTestDB(t *testing.T, db *sql.DB) {
+	t.Helper()
+	if db == nil {
+		return
+	}
+	if err := db.Close(); err != nil {
+		t.Logf("关闭数据库失败: %v", err)
+	}
 }
 
 // TestCreateTable 测试创建表
@@ -44,28 +91,8 @@ func TestCreateTable(t *testing.T) {
 	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取MySQL配置失败，请检查db.json文件")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建MySQL连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("数据库连接失败: %v", err)
-	}
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	createSQL := pbMySqlDB.GetCreateTableSQL(testTable)
 	if createSQL == "" {
@@ -83,28 +110,8 @@ func TestAlterTable(t *testing.T) {
 	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取MySQL配置失败")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("连接数据库失败: %v", err)
-	}
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 先确保表存在
 	if _, err := db.Exec(pbMySqlDB.GetCreateTableSQL(testTable)); err != nil {
@@ -144,28 +151,8 @@ func TestLoadSave(t *testing.T) {
 	}
 	pbMySqlDB.RegisterTable(pbSave)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取配置失败")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("连接数据库失败: %v", err)
-	}
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 清理旧数据
 	if _, err := db.Exec("DELETE FROM " + GetTableName(pbSave) + " WHERE id IN (1,2)"); err != nil {
@@ -227,28 +214,8 @@ func TestFindInsert(t *testing.T) {
 	}
 	pbMySqlDB.RegisterTable(pbSave)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取配置失败")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("连接数据库失败: %v", err)
-	}
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 清理旧数据
 	if _, err := db.Exec("DELETE FROM " + GetTableName(pbSave) + " WHERE id IN (1,2)"); err != nil {
@@ -289,28 +256,8 @@ func TestLoadByWhereCase(t *testing.T) {
 	}
 	pbMySqlDB.RegisterTable(pbSave)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取配置失败")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("连接数据库失败: %v", err)
-	}
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 清理旧数据
 	if _, err := db.Exec("DELETE FROM " + GetTableName(pbSave) + " WHERE id=1"); err != nil {
@@ -340,28 +287,8 @@ func TestSpecialCharacterEscape(t *testing.T) {
 	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取MySQL配置失败，请检查db.json")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建MySQL连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("数据库连接失败: %v", err)
-	}
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 测试用特殊字符集（修复：所有反斜杠用双反斜杠转义）
 	specialChars := []struct {
@@ -430,28 +357,8 @@ func TestStringWithSpaces(t *testing.T) {
 	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取配置失败")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("连接数据库失败: %v", err)
-	}
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 测试用例
 	testCases := []struct {
@@ -513,28 +420,8 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取配置失败")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("连接数据库失败: %v", err)
-	}
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 构造预期数据
 	expectedList := &messageoption.GolangTestList{
@@ -610,28 +497,8 @@ func TestSpecialCharacterEscape1(t *testing.T) {
 	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取MySQL配置失败，请检查db.json")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建MySQL连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("数据库连接失败: %v", err)
-	}
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 新增：12种高频特殊字符场景 + 原有场景，共22种
 	specialChars := []struct {
@@ -738,28 +605,8 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取MySQL配置失败，请检查db.json")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建MySQL连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("数据库连接失败: %v", err)
-	}
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// --------------- 1. ASCII控制字符（0-31 + 127，共33个）---------------
 	asciiControlChars := []struct {
@@ -990,20 +837,8 @@ func TestNullValueHandling(t *testing.T) {
 	}
 	pbMySqlDB.RegisterTable(pbSave)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取配置失败")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer db.Close()
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatal(err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 清理旧数据
 	db.Exec("DELETE FROM " + GetTableName(pbSave) + " WHERE id=3")
@@ -1048,20 +883,8 @@ func TestLargeFieldStorage(t *testing.T) {
 	}
 	pbMySqlDB.RegisterTable(pbSave)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取配置失败")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer db.Close()
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatal(err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 清理旧数据
 	db.Exec("DELETE FROM " + GetTableName(pbSave) + " WHERE id=4")
@@ -1092,20 +915,8 @@ func TestBatchOperations(t *testing.T) {
 	testTable := &messageoption.GolangTest{}
 	pbMySqlDB.RegisterTable(testTable)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取配置失败")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer db.Close()
-
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatal(err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 清理旧数据
 	db.Exec("DELETE FROM " + GetTableName(testTable) + " WHERE group_id=3")
@@ -1147,23 +958,8 @@ func TestUpdateFieldType(t *testing.T) {
 	tableName := GetTableName(testTable)
 	pbMySqlDB.RegisterTable(testTable)
 
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取MySQL配置失败")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer db.Close()
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("连接数据库失败: %v", err)
-	}
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 确保测试表干净（先删除表）
 	_, _ = db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", escapeMySQLName(tableName)))
@@ -1230,27 +1026,8 @@ func TestUpdateFieldType(t *testing.T) {
 func TestFindMultiByWhereClauses(t *testing.T) {
 	// 1. 初始化数据库连接
 	pbMySqlDB := NewPbMysqlDB()
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取MySQL配置失败，请检查db.json文件")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建MySQL连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("数据库连接失败: %v", err)
-	}
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 2. 准备4张表的测试数据（原始表+3张新增表）
 	// 原始表数据
@@ -1433,27 +1210,8 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 func TestFindMultiInterfaces(t *testing.T) {
 	// 1. 初始化数据库连接
 	pbMySqlDB := NewPbMysqlDB()
-	mysqlConfig := GetMysqlConfig()
-	if mysqlConfig == nil {
-		t.Fatal("获取MySQL配置失败，请检查db.json文件")
-	}
-	conn, err := mysql.NewConnector(mysqlConfig)
-	if err != nil {
-		t.Fatalf("创建MySQL连接器失败: %v", err)
-	}
-	db := sql.OpenDB(conn)
-	defer func(db *sql.DB) {
-		if err := db.Close(); err != nil {
-			t.Logf("关闭数据库失败: %v", err)
-		}
-	}(db)
-
-	if err := db.Ping(); err != nil {
-		t.Fatalf("数据库连接失败: %v", err)
-	}
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
-		t.Fatalf("切换数据库失败: %v", err)
-	}
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
 
 	// 2. 注册测试表（golang_test）
 	testTable := &messageoption.GolangTest{}
