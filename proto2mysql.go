@@ -1,6 +1,7 @@
 package proto2mysql
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -12,7 +13,7 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/go-sql-driver/mysql"
+	"github.com/go-sql-driver/mysql"
 	"github.com/luyuancpp/proto2mysql/pbconv"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
@@ -39,6 +40,7 @@ var (
 	ErrFieldNotFound      = errors.New("field not found in message")
 	ErrMultipleRowsFound  = errors.New("multiple rows found")
 	ErrNoRowsFound        = errors.New("no rows found")
+	ErrDuplicateKey       = errors.New("duplicate key")
 	ErrBatchSizeExceeded  = fmt.Errorf("batch size exceeds maximum %d", BatchInsertMaxSize)
 )
 
@@ -140,21 +142,78 @@ type PbMysqlDB struct {
 	// tableExistsCache 缓存表是否存在的查询结果
 	tableExistsCache map[string]bool
 	tableExistsMu    sync.RWMutex
+	// ctx 由WithContext绑定，用于超时控制/trace传递；nil时用context.Background()
+	ctx context.Context
 }
 
-// sqlExecutor 统一*sql.DB与*sql.Tx的执行接口
-type sqlExecutor interface {
-	Exec(query string, args ...interface{}) (sql.Result, error)
-	Query(query string, args ...interface{}) (*sql.Rows, error)
-	QueryRow(query string, args ...interface{}) *sql.Row
+// contextExecutor 统一*sql.DB与*sql.Tx的context执行接口
+type contextExecutor interface {
+	ExecContext(ctx context.Context, query string, args ...interface{}) (sql.Result, error)
+	QueryContext(ctx context.Context, query string, args ...interface{}) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...interface{}) *sql.Row
 }
 
-// conn 返回当前执行器：事务内返回tx，否则返回DB
+// sqlExecutor 绑定context的执行器：所有内部SQL都经由它下发，
+// 保证WithContext传入的超时/trace能作用到每条语句
+type sqlExecutor struct {
+	ctx context.Context
+	db  contextExecutor
+}
+
+func (e sqlExecutor) Exec(query string, args ...interface{}) (sql.Result, error) {
+	return e.db.ExecContext(e.ctx, query, args...)
+}
+
+func (e sqlExecutor) Query(query string, args ...interface{}) (*sql.Rows, error) {
+	return e.db.QueryContext(e.ctx, query, args...)
+}
+
+func (e sqlExecutor) QueryRow(query string, args ...interface{}) *sql.Row {
+	return e.db.QueryRowContext(e.ctx, query, args...)
+}
+
+// conn 返回当前执行器：事务内返回tx，否则返回DB（均绑定当前context）
 func (p *PbMysqlDB) conn() sqlExecutor {
 	if p.tx != nil {
-		return p.tx
+		return sqlExecutor{ctx: p.context(), db: p.tx}
 	}
-	return p.DB
+	return sqlExecutor{ctx: p.context(), db: p.DB}
+}
+
+// context 返回当前绑定的context，未绑定时返回Background
+func (p *PbMysqlDB) context() context.Context {
+	if p.ctx != nil {
+		return p.ctx
+	}
+	return context.Background()
+}
+
+// WithContext 返回绑定ctx的新实例（共享Tables/DB/缓存配置），用于传递超时与trace：
+//
+//	pbDB.WithContext(ctx).FindOneByPK(msg)
+//
+// 注意：请在根实例上调用；RunInTransaction内请直接使用回调收到的tx实例
+// （事务实例的延迟缓存失效记录不会跨实例传递）。
+func (p *PbMysqlDB) WithContext(ctx context.Context) *PbMysqlDB {
+	return &PbMysqlDB{
+		Tables:           p.Tables,
+		DB:               p.DB,
+		DBName:           p.DBName,
+		tx:               p.tx,
+		cache:            p.cache,
+		cacheTTL:         p.cacheTTL,
+		tableExistsCache: make(map[string]bool),
+		ctx:              ctx,
+	}
+}
+
+// wrapExecErr 把MySQL 1062（唯一键冲突）包装成可errors.Is(err, ErrDuplicateKey)判断的哨兵错误
+func wrapExecErr(err error) error {
+	var me *mysql.MySQLError
+	if errors.As(err, &me) && me.Number == 1062 {
+		return fmt.Errorf("%w: %w", ErrDuplicateKey, err)
+	}
+	return err
 }
 
 // RunInTransaction 在事务中执行fn：fn收到的tx可直接使用全部增删改查接口，
@@ -171,6 +230,7 @@ func (p *PbMysqlDB) RunInTransaction(fn func(tx *PbMysqlDB) error) error {
 			cache:            p.cache,
 			cacheTTL:         p.cacheTTL,
 			tableExistsCache: make(map[string]bool),
+			ctx:              p.ctx,
 		}
 		return fn(txDB)
 	})
@@ -185,7 +245,7 @@ func (p *PbMysqlDB) RunInTransaction(fn func(tx *PbMysqlDB) error) error {
 func (p *PbMysqlDB) OpenDB(db *sql.DB, dbname string) error {
 	p.DB = db
 	p.DBName = dbname
-	_, err := p.DB.Exec("USE " + escapeMySQLName(p.DBName))
+	_, err := p.DB.ExecContext(p.context(), "USE "+escapeMySQLName(p.DBName))
 	return err
 }
 
@@ -388,9 +448,9 @@ func (p *PbMysqlDB) getTableColumns(tableName string) (map[string]string, error)
 		FROM INFORMATION_SCHEMA.COLUMNS 
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 	`
-	rows, err := p.DB.Query(query, p.DBName, tableName)
+	rows, err := p.DB.QueryContext(p.context(), query, p.DBName, table.tableName)
 	if err != nil {
-		return nil, fmt.Errorf("query columns for table %s: %w", tableName, err)
+		return nil, fmt.Errorf("query columns for table %s: %w", table.tableName, err)
 	}
 	defer rows.Close()
 
@@ -439,18 +499,18 @@ func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 	}
 
-	exists, err := p.IsTableExists(tableName)
+	exists, err := p.IsTableExists(table.tableName)
 	if err != nil {
-		return fmt.Errorf("检查表 %s 存在性: %w", tableName, err)
+		return fmt.Errorf("检查表 %s 存在性: %w", table.tableName, err)
 	}
 
 	// 如果表不存在，直接创建
 	if !exists {
 		createSQL := table.GetCreateTableSQL()
-		if _, err := p.DB.Exec(createSQL); err != nil {
-			return fmt.Errorf("创建表 %s 失败: %w, SQL: %s", tableName, err, createSQL)
+		if _, err := p.DB.ExecContext(p.context(), createSQL); err != nil {
+			return fmt.Errorf("创建表 %s 失败: %w, SQL: %s", table.tableName, err, createSQL)
 		}
-		p.updateTableExistsCache(tableName, true)
+		p.updateTableExistsCache(table.tableName, true)
 		return nil
 	}
 
@@ -487,10 +547,10 @@ func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 
 	// 执行ALTER TABLE（如果有需要修改的内容）
 	if len(alterSQLs) > 0 {
-		alterSQL := fmt.Sprintf("ALTER TABLE %s %s", escapeMySQLName(tableName), strings.Join(alterSQLs, ", "))
-		_, err := p.DB.Exec(alterSQL)
+		alterSQL := fmt.Sprintf("ALTER TABLE %s %s", escapeMySQLName(table.tableName), strings.Join(alterSQLs, ", "))
+		_, err := p.DB.ExecContext(p.context(), alterSQL)
 		if err != nil {
-			return fmt.Errorf("更新表 %s 结构失败: %w, SQL: %s", tableName, err, alterSQL)
+			return fmt.Errorf("更新表 %s 结构失败: %w, SQL: %s", table.tableName, err, alterSQL)
 		}
 		p.clearColumnCache(tableName) // 清除缓存，下次查询时重新加载字段
 	}
@@ -513,7 +573,7 @@ func (p *PbMysqlDB) IsTableExists(tableName string) (bool, error) {
 		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
 	`
 	var count int
-	err := p.DB.QueryRow(query, p.DBName, tableName).Scan(&count)
+	err := p.DB.QueryRowContext(p.context(), query, p.DBName, tableName).Scan(&count)
 	if err != nil {
 		return false, fmt.Errorf("query table %s exists: %w", tableName, err)
 	}
@@ -677,7 +737,7 @@ func (p *PbMysqlDB) Insert(message proto.Message) error {
 	_, err = p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
 		return fmt.Errorf("exec insert for table %s: sql=%s, args=%v, err=%w",
-			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
+			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, wrapExecErr(err))
 	}
 	return nil
 }
@@ -710,7 +770,7 @@ func (p *PbMysqlDB) BatchInsert(messages []proto.Message) error {
 		_, err = p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 		if err != nil {
 			return fmt.Errorf("exec batch insert for table %s: sql=%s, args len=%d, err=%w",
-				tableName, sqlWithArgs.Sql, len(sqlWithArgs.Args), err)
+				tableName, sqlWithArgs.Sql, len(sqlWithArgs.Args), wrapExecErr(err))
 		}
 	}
 
@@ -756,7 +816,7 @@ func (p *PbMysqlDB) InsertReturningID(message proto.Message) (int64, error) {
 
 	result, err := p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
-		return 0, fmt.Errorf("exec insert for table %s: %w", table.tableName, err)
+		return 0, fmt.Errorf("exec insert for table %s: %w", table.tableName, wrapExecErr(err))
 	}
 	return result.LastInsertId()
 }
@@ -1074,6 +1134,73 @@ func (p *PbMysqlDB) UpdateIfVersion(message proto.Message, versionField string) 
 	result, err := p.conn().Exec(sqlStmt, args...)
 	if err != nil {
 		return false, fmt.Errorf("exec update if version for table %s: %w", table.tableName, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected > 0 {
+		p.invalidateMessages(table, message)
+	}
+	return affected > 0, nil
+}
+
+// UpdateFieldsIfVersion 乐观锁CAS+显式字段列表：
+//
+//	UPDATE t SET f1=?,..., ver=ver+1 WHERE pk=? AND ver=?
+//
+// 与UpdateIfVersion的区别：不用Has()自动挑字段，显式列出要写的列，
+// 规避proto3隐式presence下零值字段（空bytes/0/""）被跳过的坑。
+// 返回false=版本冲突，调用方重读重试。
+func (p *PbMysqlDB) UpdateFieldsIfVersion(message proto.Message, versionField string, fields ...string) (bool, error) {
+	if len(fields) == 0 {
+		return false, errors.New("no fields to update")
+	}
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return false, err
+	}
+	versionDesc, ok := table.fieldNameToDesc[versionField]
+	if !ok {
+		return false, fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, versionField, table.tableName)
+	}
+	curVersion, err := pbconv.SerializeFieldAsString(message, versionDesc)
+	if err != nil {
+		return false, fmt.Errorf("serialize version field %s: %w", versionField, err)
+	}
+
+	clauses := make([]string, 0, len(fields)+1)
+	args := make([]interface{}, 0, len(fields)+2)
+	for _, name := range fields {
+		if name == versionField {
+			continue // version 由下面统一 +1
+		}
+		desc, ok := table.fieldNameToDesc[name]
+		if !ok {
+			return false, fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, name, table.tableName)
+		}
+		val, err := pbconv.SerializeFieldAsString(message, desc)
+		if err != nil {
+			return false, fmt.Errorf("serialize update field %s: %w", name, err)
+		}
+		clauses = append(clauses, escapeMySQLName(name)+" = ?")
+		args = append(args, val)
+	}
+	escapedVersion := escapeMySQLName(versionField)
+	clauses = append(clauses, fmt.Sprintf("%s = %s + 1", escapedVersion, escapedVersion))
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return false, err
+	}
+	sqlStmt := fmt.Sprintf("UPDATE %s SET %s WHERE %s AND %s = ?",
+		escapeMySQLName(table.tableName), strings.Join(clauses, ", "), whereClause, escapedVersion)
+	args = append(args, whereArgs...)
+	args = append(args, curVersion)
+
+	result, err := p.conn().Exec(sqlStmt, args...)
+	if err != nil {
+		return false, fmt.Errorf("exec update fields if version for table %s: %w", table.tableName, err)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
@@ -1697,7 +1824,7 @@ func (p *PbMysqlDB) Transaction(fn func(tx *sql.Tx) error) error {
 	if p.tx != nil {
 		return errors.New("nested transaction is not supported")
 	}
-	tx, err := p.DB.Begin()
+	tx, err := p.DB.BeginTx(p.context(), nil)
 	if err != nil {
 		return fmt.Errorf("begin transaction: %w", err)
 	}
@@ -1841,7 +1968,7 @@ func (p *PbMysqlDB) FindMultiByWhereClauses(queries []MultiQuery) error {
 	}
 
 	sqlStmt := strings.Join(sqlParts, "; ")
-	rows, err := p.DB.Query(sqlStmt, allArgs...)
+	rows, err := p.DB.QueryContext(p.context(), sqlStmt, allArgs...)
 	if err != nil {
 		return fmt.Errorf("exec multi select: %w, SQL: %s, args: %v", err, sqlStmt, allArgs)
 	}
@@ -1872,14 +1999,23 @@ func newMessageTable(m proto.Message, opts ...TableOption) *MessageTable {
 	return table
 }
 
-// RegisterTable 注册Protobuf与表的映射关系
+// RegisterTable 注册Protobuf与表的映射关系。
+// 注册键固定为proto full name（查找路径统一按消息FullName解析）；
+// table.tableName仅决定生成SQL中的表名，可用WithTableName自定义。
 func (p *PbMysqlDB) RegisterTable(m proto.Message, opts ...TableOption) {
 	table := newMessageTable(m, opts...)
-	p.Tables[table.tableName] = table
+	p.Tables[GetTableName(m)] = table
 }
 
 // TableOption 表选项函数
 type TableOption func(*MessageTable)
+
+// WithTableName 自定义SQL表名（默认=proto full name）。
+// 用于对接已有表/迁移脚本管理的表名（如 player_data）。
+// 注意：注册与查找仍按proto full name进行，此选项只影响生成的SQL。
+func WithTableName(name string) TableOption {
+	return func(t *MessageTable) { t.tableName = name }
+}
 
 // WithPrimaryKey 设置主键
 func WithPrimaryKey(keys ...string) TableOption {

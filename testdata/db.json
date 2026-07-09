@@ -1,7 +1,7 @@
 {
 			"Net": "",
-			"Addr": "127.0.0.1:3306",
+			"Addr": "127.0.0.1:3307",
 			"User": "root",
-			"Passwd": "root",
+			"Passwd": "pandora_dev_root",
 			"DBName": "game"
 }

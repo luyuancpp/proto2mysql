@@ -1,8 +1,10 @@
 package proto2mysql
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -87,6 +89,22 @@ func closeTestDB(t *testing.T, db *sql.DB) {
 
 func testTableSQLName(m proto.Message) string {
 	return escapeMySQLName(GetTableName(m))
+}
+
+// recreateTestTable 删表重建：保证表schema与当前注册选项（主键/自增等）一致。
+// CREATE TABLE IF NOT EXISTS不会给已存在的表补主键，共享表的测试之间会互相污染
+func recreateTestTable(t *testing.T, db *sql.DB, pbMySqlDB *PbMysqlDB, m proto.Message) {
+	t.Helper()
+	table, err := pbMySqlDB.tableForMessage(m)
+	if err != nil {
+		t.Fatalf("解析注册表失败: %v", err)
+	}
+	if _, err := db.Exec("DROP TABLE IF EXISTS " + escapeMySQLName(table.tableName)); err != nil {
+		t.Fatalf("重建前清理表失败: %v", err)
+	}
+	if _, err := db.Exec(table.GetCreateTableSQL()); err != nil {
+		t.Fatalf("预处理表结构失败: %v", err)
+	}
 }
 
 // TestCreateTable 测试创建表
@@ -1439,14 +1457,12 @@ func TestBatchInsertRejectsMismatchedDescriptor(t *testing.T) {
 func TestCountExistsPageUpdate(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable)
+	pbMySqlDB.RegisterTable(testTable, WithPrimaryKey("id"))
 
 	db := mustOpenTestDB(t, pbMySqlDB)
 	defer closeTestDB(t, db)
 
-	if _, err := db.Exec(pbMySqlDB.GetCreateTableSQL(testTable)); err != nil {
-		t.Fatalf("预处理表结构失败: %v", err)
-	}
+	recreateTestTable(t, db, pbMySqlDB, testTable)
 
 	// 清理并写入5条测试数据（group_id=9）
 	if _, err := db.Exec("DELETE FROM " + testTableSQLName(testTable) + " WHERE group_id=9"); err != nil {
@@ -1637,9 +1653,7 @@ func TestPKAndBatchInterfaces(t *testing.T) {
 	db := mustOpenTestDB(t, pbMySqlDB)
 	defer closeTestDB(t, db)
 
-	if _, err := db.Exec(pbMySqlDB.GetCreateTableSQL(testTable)); err != nil {
-		t.Fatalf("预处理表结构失败: %v", err)
-	}
+	recreateTestTable(t, db, pbMySqlDB, testTable)
 	if _, err := db.Exec("DELETE FROM " + testTableSQLName(testTable) + " WHERE group_id=8"); err != nil {
 		t.Logf("清理旧数据失败: %v", err)
 	}
@@ -1741,15 +1755,13 @@ func TestPKAndBatchInterfaces(t *testing.T) {
 func TestGameServerInterfaces(t *testing.T) {
 	pbMySqlDB := NewPbMysqlDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable)
+	pbMySqlDB.RegisterTable(testTable, WithPrimaryKey("id"))
 
 	db := mustOpenTestDB(t, pbMySqlDB)
 	defer closeTestDB(t, db)
 
-	if _, err := db.Exec(pbMySqlDB.GetCreateTableSQL(testTable)); err != nil {
-		t.Fatalf("预处理表结构失败: %v", err)
-	}
-	if _, err := db.Exec("DELETE FROM " + GetTableName(testTable) + " WHERE group_id=7"); err != nil {
+	recreateTestTable(t, db, pbMySqlDB, testTable)
+	if _, err := db.Exec("DELETE FROM " + testTableSQLName(testTable) + " WHERE group_id=7"); err != nil {
 		t.Logf("清理旧数据失败: %v", err)
 	}
 
@@ -1955,9 +1967,8 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 	db := mustOpenTestDB(t, pbMySqlDB)
 	defer closeTestDB(t, db)
 
-	if _, err := db.Exec(pbMySqlDB.GetCreateTableSQL(testTable)); err != nil {
-		t.Fatalf("预处理表结构失败: %v", err)
-	}
+	// 其它测试可能已用无主键的schema建过golang_test，重建以保证主键/自增约束生效
+	recreateTestTable(t, db, pbMySqlDB, testTable)
 	if _, err := db.Exec("DELETE FROM " + testTableSQLName(testTable) + " WHERE player_id=9900"); err != nil {
 		t.Logf("清理旧数据失败: %v", err)
 	}
@@ -2130,4 +2141,183 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 	})
 
 	t.Log("扩展增删改查接口测试通过")
+}
+
+// TestWithTableNameRegistration 单元测试：自定义表名只影响SQL，注册键仍为proto full name
+func TestWithTableNameRegistration(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	msg := &messageoption.GolangTest{}
+	pbMySqlDB.RegisterTable(msg, WithTableName("player_data"), WithPrimaryKey("id"))
+
+	// 注册键固定为proto full name，否则tableForMessage按FullName查表会miss
+	table, ok := pbMySqlDB.Tables[GetTableName(msg)]
+	if !ok {
+		t.Fatal("注册键应为proto full name")
+	}
+	if table.tableName != "player_data" {
+		t.Errorf("SQL表名应为player_data，实际%s", table.tableName)
+	}
+
+	// 行消息与列表消息的查找路径都应能解析
+	if _, err := pbMySqlDB.tableForMessage(msg); err != nil {
+		t.Errorf("tableForMessage应能解析自定义表名的注册: %v", err)
+	}
+	if _, _, err := resolveListTable(pbMySqlDB.Tables, &messageoption.GolangTestList{}); err != nil {
+		t.Errorf("resolveListTable应能解析自定义表名的注册: %v", err)
+	}
+
+	// 预生成SQL应使用自定义表名
+	if !strings.Contains(table.insertSQLTemplate, "`player_data`") {
+		t.Errorf("INSERT模板应使用自定义表名: %s", table.insertSQLTemplate)
+	}
+	if !strings.Contains(table.selectFieldsSQL, "`player_data`") {
+		t.Errorf("SELECT模板应使用自定义表名: %s", table.selectFieldsSQL)
+	}
+	if !strings.Contains(pbMySqlDB.GetCreateTableSQL(msg), "`player_data`") {
+		t.Errorf("建表SQL应使用自定义表名")
+	}
+}
+
+// TestWrapExecErr 单元测试：MySQL 1062包装为ErrDuplicateKey，其它错误透传
+func TestWrapExecErr(t *testing.T) {
+	dup := &mysql.MySQLError{Number: 1062, Message: "Duplicate entry '1' for key 'PRIMARY'"}
+	wrapped := wrapExecErr(fmt.Errorf("exec: %w", dup))
+	if !errors.Is(wrapped, ErrDuplicateKey) {
+		t.Errorf("1062应可用errors.Is(ErrDuplicateKey)判断: %v", wrapped)
+	}
+	var me *mysql.MySQLError
+	if !errors.As(wrapped, &me) || me.Number != 1062 {
+		t.Errorf("包装后应保留原始MySQLError链: %v", wrapped)
+	}
+
+	other := &mysql.MySQLError{Number: 1146, Message: "Table doesn't exist"}
+	if errors.Is(wrapExecErr(other), ErrDuplicateKey) {
+		t.Error("非1062不应包装为ErrDuplicateKey")
+	}
+	plain := errors.New("plain")
+	if wrapExecErr(plain) != plain {
+		t.Error("普通错误应原样透传")
+	}
+	if wrapExecErr(nil) != nil {
+		t.Error("nil应透传nil")
+	}
+}
+
+// TestUpdateFieldsIfVersionValidation 单元测试：显式字段CAS的参数校验（无需数据库）
+func TestUpdateFieldsIfVersionValidation(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	pbMySqlDB.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
+	msg := &messageoption.GolangTest{Id: 1}
+
+	if _, err := pbMySqlDB.UpdateFieldsIfVersion(msg, "group_id"); err == nil {
+		t.Error("不传字段应报错")
+	}
+	if _, err := pbMySqlDB.UpdateFieldsIfVersion(msg, "no_such_field", "ip"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+		t.Errorf("未知版本字段应返回ErrFieldNotFound，实际: %v", err)
+	}
+	if _, err := pbMySqlDB.UpdateFieldsIfVersion(msg, "group_id", "no_such_field"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+		t.Errorf("未知更新字段应返回ErrFieldNotFound，实际: %v", err)
+	}
+}
+
+// TestWithContextUnit 单元测试：WithContext返回共享映射的新实例，未绑定时退回Background
+func TestWithContextUnit(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	pbMySqlDB.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
+
+	if pbMySqlDB.context() != context.Background() {
+		t.Error("未绑定ctx时应返回Background")
+	}
+
+	type ctxKey struct{}
+	ctx := context.WithValue(context.Background(), ctxKey{}, "v")
+	bound := pbMySqlDB.WithContext(ctx)
+	if bound == pbMySqlDB {
+		t.Error("WithContext应返回新实例")
+	}
+	if bound.context() != ctx {
+		t.Error("新实例应绑定传入的ctx")
+	}
+	if _, err := bound.tableForMessage(&messageoption.GolangTest{}); err != nil {
+		t.Errorf("新实例应共享已注册的表: %v", err)
+	}
+	// 原实例不受影响
+	if pbMySqlDB.ctx != nil {
+		t.Error("WithContext不应修改原实例")
+	}
+}
+
+// TestTableNameAndCASIntegration 集成测试：自定义表名接线全流程（对应已有表player_data场景）：
+// Insert重复键→ErrDuplicateKey；UpdateFieldsIfVersion写零值字段+版本冲突；WithContext取消传播
+func TestTableNameAndCASIntegration(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	testTable := &messageoption.GolangTest{}
+	pbMySqlDB.RegisterTable(testTable, WithTableName("golang_test_named"), WithPrimaryKey("id"))
+
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
+
+	if _, err := db.Exec("DROP TABLE IF EXISTS `golang_test_named`"); err != nil {
+		t.Fatalf("清理旧表失败: %v", err)
+	}
+	if err := pbMySqlDB.CreateOrUpdateTable(testTable); err != nil {
+		t.Fatalf("按自定义表名建表失败: %v", err)
+	}
+
+	// Insert + 回读都应落在自定义表名上
+	row := &messageoption.GolangTest{Id: 11, Ip: "10.11.0.1", Port: 7, GroupId: 0}
+	if err := pbMySqlDB.Insert(row); err != nil {
+		t.Fatalf("Insert失败: %v", err)
+	}
+	got := &messageoption.GolangTest{Id: 11}
+	if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		t.Fatalf("FindOneByPK失败: %v", err)
+	}
+	if got.Ip != "10.11.0.1" {
+		t.Errorf("回读数据不一致: ip=%s", got.Ip)
+	}
+
+	// 重复插入→errors.Is(err, ErrDuplicateKey)
+	if err := pbMySqlDB.Insert(&messageoption.GolangTest{Id: 11}); !errors.Is(err, ErrDuplicateKey) {
+		t.Errorf("重复主键应返回ErrDuplicateKey，实际: %v", err)
+	}
+
+	// UpdateFieldsIfVersion：显式字段列表，零值字段（空字符串）也能写入
+	clear := &messageoption.GolangTest{Id: 11, Ip: "", GroupId: 0}
+	ok, err := pbMySqlDB.UpdateFieldsIfVersion(clear, "group_id", "ip")
+	if err != nil {
+		t.Fatalf("UpdateFieldsIfVersion失败: %v", err)
+	}
+	if !ok {
+		t.Fatal("版本匹配时应更新成功")
+	}
+	got = &messageoption.GolangTest{Id: 11}
+	if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		t.Fatalf("回查失败: %v", err)
+	}
+	if got.Ip != "" {
+		t.Errorf("零值字段应被写入: ip=%q", got.Ip)
+	}
+	if got.GroupId != 1 {
+		t.Errorf("版本应自动+1: group_id=%d", got.GroupId)
+	}
+
+	// 过期版本→false
+	stale := &messageoption.GolangTest{Id: 11, Ip: "10.11.9.9", GroupId: 0}
+	ok, err = pbMySqlDB.UpdateFieldsIfVersion(stale, "group_id", "ip")
+	if err != nil {
+		t.Fatalf("UpdateFieldsIfVersion失败: %v", err)
+	}
+	if ok {
+		t.Error("版本冲突时应返回false")
+	}
+
+	// WithContext：已取消的ctx应中断查询
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := pbMySqlDB.WithContext(ctx).FindOneByPK(&messageoption.GolangTest{Id: 11}); err == nil {
+		t.Error("已取消的context应中断查询")
+	}
+
+	t.Log("自定义表名接线流程测试通过")
 }

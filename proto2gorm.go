@@ -34,9 +34,11 @@ func (p *PbGormDB) WithDB(db *gorm.DB) *PbGormDB {
 	}
 }
 
+// RegisterTable 注册Protobuf与表的映射关系。注册键固定为proto full name；
+// table.tableName仅决定生成SQL中的表名，可用WithTableName自定义。
 func (p *PbGormDB) RegisterTable(m proto.Message, opts ...TableOption) {
 	table := newMessageTable(m, opts...)
-	p.Tables[table.tableName] = table
+	p.Tables[GetTableName(m)] = table
 }
 
 func (p *PbGormDB) CreateOrUpdateTable(m proto.Message) error {
@@ -325,6 +327,58 @@ func (p *PbGormDB) UpdateIfVersion(message proto.Message, versionField string) (
 		return false, errors.New("no fields to update")
 	}
 
+	escapedVersion := escapeMySQLName(versionField)
+	values[versionField] = gorm.Expr(escapedVersion + " + 1")
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return false, err
+	}
+
+	result := p.DB.Table(escapeMySQLName(table.tableName)).
+		Where(whereClause, whereArgs...).
+		Where(escapedVersion+" = ?", curVersion).
+		Updates(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
+// UpdateFieldsIfVersion 乐观锁CAS+显式字段列表：不用Has()自动挑字段，
+// 规避proto3隐式presence下零值字段被跳过的坑。返回false=版本冲突
+func (p *PbGormDB) UpdateFieldsIfVersion(message proto.Message, versionField string, fields ...string) (bool, error) {
+	if len(fields) == 0 {
+		return false, errors.New("no fields to update")
+	}
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return false, err
+	}
+	versionDesc, ok := table.fieldNameToDesc[versionField]
+	if !ok {
+		return false, fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, versionField, table.tableName)
+	}
+	curVersion, err := pbconv.SerializeFieldAsString(message, versionDesc)
+	if err != nil {
+		return false, fmt.Errorf("serialize version field %s: %w", versionField, err)
+	}
+
+	values := make(map[string]interface{}, len(fields)+1)
+	for _, name := range fields {
+		if name == versionField {
+			continue // version 由下面统一 +1
+		}
+		desc, ok := table.fieldNameToDesc[name]
+		if !ok {
+			return false, fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, name, table.tableName)
+		}
+		val, err := pbconv.SerializeFieldAsString(message, desc)
+		if err != nil {
+			return false, fmt.Errorf("serialize update field %s: %w", name, err)
+		}
+		values[name] = val
+	}
 	escapedVersion := escapeMySQLName(versionField)
 	values[versionField] = gorm.Expr(escapedVersion + " + 1")
 
