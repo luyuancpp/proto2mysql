@@ -12,298 +12,280 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
-var (
-	t                 = timestamppb.Timestamp{}
-	timestampFullName = t.ProtoReflect().Descriptor().FullName()
-
-	ErrInvalidFieldKind = errors.New("invalid field kind")
-)
-
-// MapWrapper 临时包装器：用于序列化map
-type MapWrapper struct {
-	MapData protoreflect.Map
-}
-
-func (m *MapWrapper) ProtoReflect() protoreflect.Message {
-	return protoreflect.Message(nil)
-}
-
-// ListWrapper 临时包装器：用于序列化list
-type ListWrapper struct {
-	ListData protoreflect.List
-}
-
-func (l *ListWrapper) ProtoReflect() protoreflect.Message {
-	return protoreflect.Message(nil)
-}
-
-// 序列化字段（完善二进制编码和对称性）
+// SerializeFieldAsString 将消息中的单个字段序列化为字符串：
+//   - Timestamp        -> "2006-01-02 15:04:05"
+//   - map/list/bytes/嵌套消息 -> proto wire格式 + Base64
+//   - 标量             -> 十进制/布尔字符串
 func SerializeFieldAsString(message proto.Message, fieldDesc protoreflect.FieldDescriptor) (string, error) {
 	reflection := message.ProtoReflect()
 
-	// 特殊处理 Timestamp 类型
-	if fieldDesc.Kind() == protoreflect.MessageKind && fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
-		if !reflection.Has(fieldDesc) {
-			return "", nil
-		}
-		subMsg := reflection.Get(fieldDesc).Message().Interface()
-		ts, ok := subMsg.(*timestamppb.Timestamp)
-		if !ok {
-			return "", fmt.Errorf("field %s is not a Timestamp", fieldDesc.Name())
-		}
-		if ts.AsTime().IsZero() {
-			return "", nil
-		}
-		return ts.AsTime().Format("2006-01-02 15:04:05"), nil
+	if isTimestampField(fieldDesc) {
+		return serializeTimestamp(reflection, fieldDesc)
+	}
+	if fieldDesc.IsMap() || fieldDesc.IsList() {
+		return serializeContainer(reflection, fieldDesc)
 	}
 
-	// 处理 map 类型（Base64 编码）
-	if fieldDesc.IsMap() {
-		if !reflection.Has(fieldDesc) {
-			return "", nil
-		}
-		mapWrapper := &MapWrapper{MapData: reflection.Get(fieldDesc).Map()}
-		data, err := proto.Marshal(mapWrapper)
-		if err != nil {
-			return "", fmt.Errorf("serialize map field %s: %w", fieldDesc.Name(), err)
-		}
-		return base64.StdEncoding.EncodeToString(data), nil
-	}
-
-	// 处理 list 类型（Base64 编码）
-	if fieldDesc.IsList() {
-		if !reflection.Has(fieldDesc) {
-			return "", nil
-		}
-		listWrapper := &ListWrapper{ListData: reflection.Get(fieldDesc).List()}
-		data, err := proto.Marshal(listWrapper)
-		if err != nil {
-			return "", fmt.Errorf("serialize list field %s: %w", fieldDesc.Name(), err)
-		}
-		return base64.StdEncoding.EncodeToString(data), nil
-	}
-
-	// 处理基本类型
 	switch fieldDesc.Kind() {
-	case protoreflect.Int32Kind:
-		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Int()), nil
-	case protoreflect.Uint32Kind:
-		return fmt.Sprintf("%d", reflection.Get(fieldDesc).Uint()), nil
+	case protoreflect.Int32Kind, protoreflect.Int64Kind:
+		return strconv.FormatInt(reflection.Get(fieldDesc).Int(), 10), nil
+	case protoreflect.Uint32Kind, protoreflect.Uint64Kind:
+		return strconv.FormatUint(reflection.Get(fieldDesc).Uint(), 10), nil
 	case protoreflect.FloatKind:
-		val := reflection.Get(fieldDesc).Float()
-		return strconv.FormatFloat(val, 'f', -1, 32), nil
+		return strconv.FormatFloat(reflection.Get(fieldDesc).Float(), 'f', -1, 32), nil
+	case protoreflect.DoubleKind:
+		return strconv.FormatFloat(reflection.Get(fieldDesc).Float(), 'f', -1, 64), nil
 	case protoreflect.StringKind:
 		return reflection.Get(fieldDesc).String(), nil
-	case protoreflect.Int64Kind:
-		return strconv.FormatInt(reflection.Get(fieldDesc).Int(), 10), nil
-	case protoreflect.Uint64Kind:
-		return strconv.FormatUint(reflection.Get(fieldDesc).Uint(), 10), nil
-	case protoreflect.DoubleKind:
-		val := reflection.Get(fieldDesc).Float()
-		return strconv.FormatFloat(val, 'f', -1, 64), nil
 	case protoreflect.BoolKind:
-		return fmt.Sprintf("%t", reflection.Get(fieldDesc).Bool()), nil
+		return strconv.FormatBool(reflection.Get(fieldDesc).Bool()), nil
 	case protoreflect.EnumKind:
-		return fmt.Sprintf("%d", int32(reflection.Get(fieldDesc).Enum())), nil
+		return strconv.FormatInt(int64(reflection.Get(fieldDesc).Enum()), 10), nil
 	case protoreflect.BytesKind:
 		return base64.StdEncoding.EncodeToString(reflection.Get(fieldDesc).Bytes()), nil
 	case protoreflect.MessageKind:
-		if reflection.Has(fieldDesc) {
-			subMsg := reflection.Get(fieldDesc).Message().Interface()
-			data, err := proto.Marshal(subMsg)
-			if err != nil {
-				return "", fmt.Errorf("marshal sub-message field %s: %w", fieldDesc.Name(), err)
-			}
-			return base64.StdEncoding.EncodeToString(data), nil
+		if !reflection.Has(fieldDesc) {
+			return "", nil
 		}
-		return "", nil
+		data, err := proto.Marshal(reflection.Get(fieldDesc).Message().Interface())
+		if err != nil {
+			return "", fmt.Errorf("marshal sub-message field %s: %w", fieldDesc.Name(), err)
+		}
+		return base64.StdEncoding.EncodeToString(data), nil
 	default:
 		return "", fmt.Errorf("%w: %v (field: %s)", ErrInvalidFieldKind, fieldDesc.Kind(), fieldDesc.Name())
 	}
 }
 
-// 反序列化字段（完善二进制解码和时间格式容错）
+// serializeTimestamp 将Timestamp字段格式化为MySQL DATETIME字符串（未设置或零值返回空串）
+func serializeTimestamp(reflection protoreflect.Message, fieldDesc protoreflect.FieldDescriptor) (string, error) {
+	if !reflection.Has(fieldDesc) {
+		return "", nil
+	}
+	ts, ok := reflection.Get(fieldDesc).Message().Interface().(*timestamppb.Timestamp)
+	if !ok {
+		return "", fmt.Errorf("field %s is not a Timestamp", fieldDesc.Name())
+	}
+	if ts.AsTime().IsZero() {
+		return "", nil
+	}
+	return ts.AsTime().Format(mysqlDateTimeLayout), nil
+}
+
+// serializeContainer 序列化map/list字段：将字段放入一个同类型的空消息中，
+// 用标准proto wire格式编码后再Base64，保证与parseContainer对称可逆。
+func serializeContainer(reflection protoreflect.Message, fieldDesc protoreflect.FieldDescriptor) (string, error) {
+	if !reflection.Has(fieldDesc) {
+		return "", nil
+	}
+	holder := reflection.New()
+	holder.Set(fieldDesc, reflection.Get(fieldDesc))
+	data, err := proto.Marshal(holder.Interface())
+	if err != nil {
+		return "", fmt.Errorf("serialize field %s: %w", fieldDesc.Name(), err)
+	}
+	return base64.StdEncoding.EncodeToString(data), nil
+}
+
+var (
+	// timestampFullName 是google.protobuf.Timestamp的全名，用于字段类型判断
+	timestampFullName = (&timestamppb.Timestamp{}).ProtoReflect().Descriptor().FullName()
+
+	ErrInvalidFieldKind = errors.New("invalid field kind")
+)
+
+// mysqlDateTimeLayout 是写入MySQL DATETIME列的时间格式
+const mysqlDateTimeLayout = "2006-01-02 15:04:05"
+
+// timestampParseLayouts 是从MySQL读取时间时支持的格式（按优先级尝试）
+var timestampParseLayouts = []string{
+	"2006-01-02 15:04:05.999", // 带毫秒
+	"2006-01-02 15:04:05",     // 不带毫秒
+	"2006-01-02",              // 仅日期
+}
+
+// isTimestampField 判断字段是否为单值的google.protobuf.Timestamp
+func isTimestampField(fd protoreflect.FieldDescriptor) bool {
+	return !fd.IsMap() && !fd.IsList() &&
+		fd.Kind() == protoreflect.MessageKind &&
+		fd.Message() != nil &&
+		fd.Message().FullName() == timestampFullName
+}
+
+// ParseFromString 按字段声明顺序，把一行查询结果（字符串切片）反序列化到消息中。
+// row[i]对应消息的第i个字段，与SerializeFieldAsString生成的格式对称。
 func ParseFromString(message proto.Message, row []string) error {
 	reflection := message.ProtoReflect()
-	desc := reflection.Descriptor()
+	fields := reflection.Descriptor().Fields()
 
-	for i := 0; i < desc.Fields().Len(); i++ {
-		if i >= len(row) {
-			continue
-		}
-
-		fieldDesc := desc.Fields().Get(i)
-		fieldValue := row[i]
-		fieldName := fieldDesc.Name()
-
-		// 特殊处理 Timestamp 类型（支持多格式）
-		if fieldDesc.Message() != nil && fieldDesc.Message().FullName() == timestampFullName {
-			if fieldValue == "" {
-				continue
-			}
-			formats := []string{
-				"2006-01-02 15:04:05.999", // 带毫秒
-				"2006-01-02 15:04:05",     // 不带毫秒
-				"2006-01-02",              // 仅日期
-			}
-			var t time.Time
-			var err error
-			for _, format := range formats {
-				t, err = time.Parse(format, fieldValue)
-				if err == nil {
-					break
-				}
-			}
-			if err != nil {
-				return fmt.Errorf("parse timestamp field %s: %w (value: %s)", fieldName, err, fieldValue)
-			}
-			ts := timestamppb.New(t)
-			data, err := proto.Marshal(ts)
-			if err != nil {
-				return fmt.Errorf("marshal timestamp field %s: %w", fieldName, err)
-			}
-			subMsg := reflection.Mutable(fieldDesc).Message().Interface()
-			if err := proto.Unmarshal(data, subMsg); err != nil {
-				return fmt.Errorf("unmarshal timestamp field %s: %w", fieldName, err)
-			}
-			continue
-		}
-
-		// 处理 map 类型（Base64 解码）
-		if fieldDesc.IsMap() {
-			if fieldValue == "" {
-				continue
-			}
-			data, err := base64.StdEncoding.DecodeString(fieldValue)
-			if err != nil {
-				return fmt.Errorf("decode map field %s: %w (value: %s)", fieldName, err, fieldValue)
-			}
-			mapWrapper := &MapWrapper{}
-			if err := proto.Unmarshal(data, mapWrapper); err != nil {
-				return fmt.Errorf("parse map field %s: %w (value: %s)", fieldName, err, fieldValue)
-			}
-			mapVal := reflection.Mutable(fieldDesc).Map()
-			mapWrapper.MapData.Range(func(key protoreflect.MapKey, val protoreflect.Value) bool {
-				mapVal.Set(key, val)
-				return true
-			})
-			continue
-		}
-
-		// 处理 list 类型（Base64 解码）
-		if fieldDesc.IsList() {
-			if fieldValue == "" {
-				continue
-			}
-			data, err := base64.StdEncoding.DecodeString(fieldValue)
-			if err != nil {
-				return fmt.Errorf("decode list field %s: %w (value: %s)", fieldName, err, fieldValue)
-			}
-			listWrapper := &ListWrapper{}
-			if err := proto.Unmarshal(data, listWrapper); err != nil {
-				return fmt.Errorf("parse list field %s: %w (value: %s)", fieldName, err, fieldValue)
-			}
-			listVal := reflection.Mutable(fieldDesc).List()
-			for i := 0; i < listWrapper.ListData.Len(); i++ {
-				listVal.Append(listWrapper.ListData.Get(i))
-			}
-			continue
-		}
-
-		// 非集合类型处理
-		if fieldValue == "" {
-			switch fieldDesc.Kind() {
-			case protoreflect.Int32Kind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfInt32(0))
-			case protoreflect.Int64Kind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfInt64(0))
-			case protoreflect.Uint32Kind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfUint32(0))
-			case protoreflect.Uint64Kind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfUint64(0))
-			case protoreflect.FloatKind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfFloat32(0))
-			case protoreflect.DoubleKind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfFloat64(0))
-			case protoreflect.BoolKind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfBool(false))
-			case protoreflect.StringKind:
-				reflection.Set(fieldDesc, protoreflect.ValueOfString(""))
-			}
-			continue
-		}
-
-		// 解析非空值
-		switch fieldDesc.Kind() {
-		case protoreflect.Int32Kind:
-			val, err := strconv.ParseInt(row[i], 10, 32)
-			if err != nil {
-				return fmt.Errorf("parse int32 field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfInt32(int32(val)))
-		case protoreflect.Int64Kind:
-			val, err := strconv.ParseInt(row[i], 10, 64)
-			if err != nil {
-				return fmt.Errorf("parse int64 field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfInt64(val))
-		case protoreflect.Uint32Kind:
-			val, err := strconv.ParseUint(row[i], 10, 32)
-			if err != nil {
-				return fmt.Errorf("parse uint32 field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfUint32(uint32(val)))
-		case protoreflect.Uint64Kind:
-			val, err := strconv.ParseUint(row[i], 10, 64)
-			if err != nil {
-				return fmt.Errorf("parse uint64 field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfUint64(val))
-		case protoreflect.FloatKind:
-			val, err := strconv.ParseFloat(row[i], 32)
-			if err != nil {
-				return fmt.Errorf("parse float field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfFloat32(float32(val)))
-		case protoreflect.DoubleKind:
-			val, err := strconv.ParseFloat(row[i], 64)
-			if err != nil {
-				return fmt.Errorf("parse double field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfFloat64(val))
-		case protoreflect.StringKind:
-			reflection.Set(fieldDesc, protoreflect.ValueOfString(row[i]))
-		case protoreflect.BoolKind:
-			val, err := strconv.ParseBool(row[i])
-			if err != nil {
-				return fmt.Errorf("parse bool field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfBool(val))
-		case protoreflect.EnumKind:
-			val, err := strconv.Atoi(row[i])
-			if err != nil {
-				return fmt.Errorf("parse enum field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfEnum(protoreflect.EnumNumber(val)))
-		case protoreflect.BytesKind:
-			data, err := base64.StdEncoding.DecodeString(row[i])
-			if err != nil {
-				return fmt.Errorf("decode bytes field %s: %w", fieldName, err)
-			}
-			reflection.Set(fieldDesc, protoreflect.ValueOfBytes(data))
-		case protoreflect.MessageKind:
-			data, err := base64.StdEncoding.DecodeString(row[i])
-			if err != nil {
-				return fmt.Errorf("decode sub-message field %s: %w", fieldName, err)
-			}
-			subMsg := reflection.Mutable(fieldDesc).Message()
-			if err := proto.Unmarshal(data, subMsg.Interface()); err != nil {
-				return fmt.Errorf("unmarshal sub-message field %s: %w (value: %s)", fieldName, err, row[i])
-			}
-		default:
-			return fmt.Errorf("%w: %v (field: %s)", ErrInvalidFieldKind, fieldDesc.Kind(), fieldName)
-		}
+	count := fields.Len()
+	if len(row) < count {
+		count = len(row)
 	}
 
+	for i := 0; i < count; i++ {
+		if err := setFieldFromString(reflection, fields.Get(i), row[i]); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// setFieldFromString 将单个字符串值反序列化到消息的指定字段
+func setFieldFromString(reflection protoreflect.Message, fieldDesc protoreflect.FieldDescriptor, raw string) error {
+	fieldName := fieldDesc.Name()
+
+	if isTimestampField(fieldDesc) {
+		return parseTimestamp(reflection, fieldDesc, raw)
+	}
+	if fieldDesc.IsMap() || fieldDesc.IsList() {
+		return parseContainer(reflection, fieldDesc, raw)
+	}
+	if raw == "" {
+		setScalarDefault(reflection, fieldDesc)
+		return nil
+	}
+
+	switch fieldDesc.Kind() {
+	case protoreflect.Int32Kind:
+		val, err := strconv.ParseInt(raw, 10, 32)
+		if err != nil {
+			return parseFieldErr("int32", fieldName, raw, err)
+		}
+		reflection.Set(fieldDesc, protoreflect.ValueOfInt32(int32(val)))
+	case protoreflect.Int64Kind:
+		val, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			return parseFieldErr("int64", fieldName, raw, err)
+		}
+		reflection.Set(fieldDesc, protoreflect.ValueOfInt64(val))
+	case protoreflect.Uint32Kind:
+		val, err := strconv.ParseUint(raw, 10, 32)
+		if err != nil {
+			return parseFieldErr("uint32", fieldName, raw, err)
+		}
+		reflection.Set(fieldDesc, protoreflect.ValueOfUint32(uint32(val)))
+	case protoreflect.Uint64Kind:
+		val, err := strconv.ParseUint(raw, 10, 64)
+		if err != nil {
+			return parseFieldErr("uint64", fieldName, raw, err)
+		}
+		reflection.Set(fieldDesc, protoreflect.ValueOfUint64(val))
+	case protoreflect.FloatKind:
+		val, err := strconv.ParseFloat(raw, 32)
+		if err != nil {
+			return parseFieldErr("float", fieldName, raw, err)
+		}
+		reflection.Set(fieldDesc, protoreflect.ValueOfFloat32(float32(val)))
+	case protoreflect.DoubleKind:
+		val, err := strconv.ParseFloat(raw, 64)
+		if err != nil {
+			return parseFieldErr("double", fieldName, raw, err)
+		}
+		reflection.Set(fieldDesc, protoreflect.ValueOfFloat64(val))
+	case protoreflect.StringKind:
+		reflection.Set(fieldDesc, protoreflect.ValueOfString(raw))
+	case protoreflect.BoolKind:
+		val, err := strconv.ParseBool(raw)
+		if err != nil {
+			return parseFieldErr("bool", fieldName, raw, err)
+		}
+		reflection.Set(fieldDesc, protoreflect.ValueOfBool(val))
+	case protoreflect.EnumKind:
+		val, err := strconv.Atoi(raw)
+		if err != nil {
+			return parseFieldErr("enum", fieldName, raw, err)
+		}
+		reflection.Set(fieldDesc, protoreflect.ValueOfEnum(protoreflect.EnumNumber(val)))
+	case protoreflect.BytesKind:
+		data, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			return fmt.Errorf("decode bytes field %s: %w", fieldName, err)
+		}
+		reflection.Set(fieldDesc, protoreflect.ValueOfBytes(data))
+	case protoreflect.MessageKind:
+		data, err := base64.StdEncoding.DecodeString(raw)
+		if err != nil {
+			return fmt.Errorf("decode sub-message field %s: %w", fieldName, err)
+		}
+		subMsg := reflection.Mutable(fieldDesc).Message()
+		if err := proto.Unmarshal(data, subMsg.Interface()); err != nil {
+			return fmt.Errorf("unmarshal sub-message field %s: %w (value: %s)", fieldName, err, raw)
+		}
+	default:
+		return fmt.Errorf("%w: %v (field: %s)", ErrInvalidFieldKind, fieldDesc.Kind(), fieldName)
+	}
+	return nil
+}
+
+// parseTimestamp 解析MySQL时间字符串到Timestamp字段（空值跳过）
+func parseTimestamp(reflection protoreflect.Message, fieldDesc protoreflect.FieldDescriptor, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	var parsed time.Time
+	var err error
+	for _, layout := range timestampParseLayouts {
+		parsed, err = time.Parse(layout, raw)
+		if err == nil {
+			break
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("parse timestamp field %s: %w (value: %s)", fieldDesc.Name(), err, raw)
+	}
+	reflection.Set(fieldDesc, protoreflect.ValueOfMessage(timestamppb.New(parsed).ProtoReflect()))
+	return nil
+}
+
+// parseContainer 反序列化map/list字段（serializeContainer的逆操作）
+func parseContainer(reflection protoreflect.Message, fieldDesc protoreflect.FieldDescriptor, raw string) error {
+	if raw == "" {
+		return nil
+	}
+	data, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		return fmt.Errorf("decode field %s: %w (value: %s)", fieldDesc.Name(), err, raw)
+	}
+
+	holder := reflection.New()
+	if err := proto.Unmarshal(data, holder.Interface()); err != nil {
+		return fmt.Errorf("parse field %s: %w", fieldDesc.Name(), err)
+	}
+	if !holder.Has(fieldDesc) {
+		return nil
+	}
+
+	if fieldDesc.IsMap() {
+		dst := reflection.Mutable(fieldDesc).Map()
+		holder.Get(fieldDesc).Map().Range(func(key protoreflect.MapKey, val protoreflect.Value) bool {
+			dst.Set(key, val)
+			return true
+		})
+		return nil
+	}
+
+	dst := reflection.Mutable(fieldDesc).List()
+	dst.Truncate(0)
+	src := holder.Get(fieldDesc).List()
+	for i := 0; i < src.Len(); i++ {
+		dst.Append(src.Get(i))
+	}
+	return nil
+}
+
+// setScalarDefault 空字符串时把标量字段重置为默认值（bytes/message/enum保持不变，与旧行为一致）
+func setScalarDefault(reflection protoreflect.Message, fieldDesc protoreflect.FieldDescriptor) {
+	switch fieldDesc.Kind() {
+	case protoreflect.Int32Kind, protoreflect.Int64Kind,
+		protoreflect.Uint32Kind, protoreflect.Uint64Kind,
+		protoreflect.FloatKind, protoreflect.DoubleKind,
+		protoreflect.BoolKind, protoreflect.StringKind:
+		reflection.Set(fieldDesc, fieldDesc.Default())
+	}
+}
+
+// parseFieldErr 统一的字段解析错误格式
+func parseFieldErr(kind string, fieldName protoreflect.Name, raw string, err error) error {
+	return fmt.Errorf("parse %s field %s: %w (value: %s)", kind, fieldName, err, raw)
 }

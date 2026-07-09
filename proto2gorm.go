@@ -1,0 +1,693 @@
+package proto2mysql
+
+import (
+	"database/sql"
+	"errors"
+	"fmt"
+
+	"github.com/luyuancpp/proto2mysql/pbconv"
+	"google.golang.org/protobuf/proto"
+	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
+)
+
+// PbGormDB keeps the protobuf mapping layer, while delegating database access to GORM.
+type PbGormDB struct {
+	Tables map[string]*MessageTable
+	DB     *gorm.DB
+	DBName string
+}
+
+func NewPbGormDB(db *gorm.DB, dbname string) *PbGormDB {
+	return &PbGormDB{
+		Tables: make(map[string]*MessageTable),
+		DB:     db,
+		DBName: dbname,
+	}
+}
+
+func (p *PbGormDB) WithDB(db *gorm.DB) *PbGormDB {
+	return &PbGormDB{
+		Tables: p.Tables,
+		DB:     db,
+		DBName: p.DBName,
+	}
+}
+
+func (p *PbGormDB) RegisterTable(m proto.Message, opts ...TableOption) {
+	table := newMessageTable(m, opts...)
+	p.Tables[table.tableName] = table
+}
+
+func (p *PbGormDB) CreateOrUpdateTable(m proto.Message) error {
+	table, err := p.tableForMessage(m)
+	if err != nil {
+		return err
+	}
+	return p.DB.Exec(table.GetCreateTableSQL()).Error
+}
+
+func (p *PbGormDB) GetCreateTableSQL(message proto.Message) string {
+	tableName := GetTableName(message)
+	table, ok := p.Tables[tableName]
+	if !ok {
+		return ""
+	}
+	return table.GetCreateTableSQL()
+}
+
+func (p *PbGormDB) Insert(message proto.Message) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	values, err := table.messageValues(message, true, true)
+	if err != nil {
+		return err
+	}
+
+	return p.DB.Table(escapeMySQLName(table.tableName)).Create(values).Error
+}
+
+func (p *PbGormDB) BatchInsert(messages []proto.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	for i := 0; i < len(messages); i += BatchInsertMaxSize {
+		end := i + BatchInsertMaxSize
+		if end > len(messages) {
+			end = len(messages)
+		}
+
+		table, err := p.tableForMessage(messages[i])
+		if err != nil {
+			return err
+		}
+
+		rows := make([]map[string]interface{}, 0, end-i)
+		for _, message := range messages[i:end] {
+			if message.ProtoReflect().Descriptor() != table.Descriptor {
+				return fmt.Errorf("messages have different descriptors")
+			}
+
+			values, err := table.messageValues(message, true, true)
+			if err != nil {
+				return err
+			}
+			rows = append(rows, values)
+		}
+
+		if err := p.DB.Table(escapeMySQLName(table.tableName)).Create(rows).Error; err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (p *PbGormDB) Save(message proto.Message) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	values, err := table.messageValues(message, true, false)
+	if err != nil {
+		return err
+	}
+
+	return p.DB.Table(escapeMySQLName(table.tableName)).
+		Clauses(clause.OnConflict{UpdateAll: true}).
+		Create(values).Error
+}
+
+func (p *PbGormDB) InsertOnDupUpdate(message proto.Message) error {
+	return p.Save(message)
+}
+
+// BatchSave 批量保存（INSERT ... ON DUPLICATE KEY UPDATE，自动分批）
+func (p *PbGormDB) BatchSave(messages []proto.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	for i := 0; i < len(messages); i += BatchInsertMaxSize {
+		end := i + BatchInsertMaxSize
+		if end > len(messages) {
+			end = len(messages)
+		}
+
+		table, err := p.tableForMessage(messages[i])
+		if err != nil {
+			return err
+		}
+
+		rows := make([]map[string]interface{}, 0, end-i)
+		for _, message := range messages[i:end] {
+			if message.ProtoReflect().Descriptor() != table.Descriptor {
+				return fmt.Errorf("messages have different descriptors")
+			}
+
+			values, err := table.messageValues(message, true, false)
+			if err != nil {
+				return err
+			}
+			rows = append(rows, values)
+		}
+
+		err = p.DB.Table(escapeMySQLName(table.tableName)).
+			Clauses(clause.OnConflict{UpdateAll: true}).
+			Create(rows).Error
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *PbGormDB) Update(message proto.Message) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	values, err := table.messageValues(message, false, false)
+	if err != nil {
+		return err
+	}
+	if len(values) == 0 {
+		return fmt.Errorf("no fields to update")
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+
+	return p.DB.Table(escapeMySQLName(table.tableName)).Where(whereClause, whereArgs...).Updates(values).Error
+}
+
+func (p *PbGormDB) UpdateByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	values, err := table.messageValues(message, false, false)
+	if err != nil {
+		return err
+	}
+	if len(values) == 0 {
+		return fmt.Errorf("no fields to update")
+	}
+
+	return p.DB.Table(escapeMySQLName(table.tableName)).Where(whereClause, whereArgs...).Updates(values).Error
+}
+
+func (p *PbGormDB) Delete(message proto.Message) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+
+	return p.DB.Table(escapeMySQLName(table.tableName)).Where(whereClause, whereArgs...).Delete(nil).Error
+}
+
+func (p *PbGormDB) DeleteByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	return p.DB.Table(escapeMySQLName(table.tableName)).Where(whereClause, whereArgs...).Delete(nil).Error
+}
+
+// DeleteByKV 按单个字段等值条件删除
+func (p *PbGormDB) DeleteByKV(message proto.Message, key string, value interface{}) error {
+	return p.DeleteByWhereWithArgs(message, escapeMySQLName(key)+" = ?", []interface{}{value})
+}
+
+// BatchDelete 按主键批量删除（DELETE ... WHERE pk IN (...)，自动分批）
+func (p *PbGormDB) BatchDelete(messages []proto.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	table, err := p.tableForMessage(messages[0])
+	if err != nil {
+		return err
+	}
+	if table.primaryKeyField == nil {
+		return ErrPrimaryKeyNotFound
+	}
+
+	pkValues := make([]interface{}, 0, len(messages))
+	for _, msg := range messages {
+		if msg.ProtoReflect().Descriptor() != table.Descriptor {
+			return fmt.Errorf("messages have different descriptors")
+		}
+		val, err := pbconv.SerializeFieldAsString(msg, table.primaryKeyField)
+		if err != nil {
+			return fmt.Errorf("serialize primary key: %w", err)
+		}
+		pkValues = append(pkValues, val)
+	}
+
+	pkName := escapeMySQLName(string(table.primaryKeyField.Name()))
+	for i := 0; i < len(pkValues); i += BatchInsertMaxSize {
+		end := i + BatchInsertMaxSize
+		if end > len(pkValues) {
+			end = len(pkValues)
+		}
+
+		err := p.DB.Table(escapeMySQLName(table.tableName)).
+			Where(pkName+" IN ?", pkValues[i:end]).
+			Delete(nil).Error
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (p *PbGormDB) FindOneByKV(message proto.Message, whereKey string, whereVal string) error {
+	return p.FindOneByWhereWithArgs(message, fmt.Sprintf("%s = ?", escapeMySQLName(whereKey)), []interface{}{whereVal})
+}
+
+// FindOneByPK 按消息中的主键值查询单条数据（查到后覆盖message其余字段）
+func (p *PbGormDB) FindOneByPK(message proto.Message) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+	return p.FindOneByWhereWithArgs(message, whereClause, whereArgs)
+}
+
+// FindAllByKVIn 按单个字段的IN条件查询批量数据（WHERE key IN (...)）
+func (p *PbGormDB) FindAllByKVIn(list proto.Message, key string, values []interface{}) error {
+	if len(values) == 0 {
+		_, listField, err := resolveListTable(p.Tables, list)
+		if err != nil {
+			return err
+		}
+		list.ProtoReflect().Mutable(listField).List().Truncate(0)
+		return nil
+	}
+
+	return p.FindAllByWhereWithArgs(list, escapeMySQLName(key)+" IN ?", []interface{}{values})
+}
+
+// FindAllByPKIn 按主键批量查询，返回列表（类似Redis MGET：不存在的主键自动跳过）
+func (p *PbGormDB) FindAllByPKIn(list proto.Message, pkValues []interface{}) error {
+	table, listField, err := resolveListTable(p.Tables, list)
+	if err != nil {
+		return err
+	}
+
+	if len(pkValues) == 0 {
+		list.ProtoReflect().Mutable(listField).List().Truncate(0)
+		return nil
+	}
+	if table.primaryKeyField == nil {
+		return ErrPrimaryKeyNotFound
+	}
+
+	pkName := escapeMySQLName(string(table.primaryKeyField.Name()))
+	return p.FindAllByWhereWithArgs(list, pkName+" IN ?", []interface{}{pkValues})
+}
+
+// FindOrCreate 按主键查询，不存在则用message当前值插入（玩家首次登录常用）。
+// 返回created表示是否新建了记录。
+func (p *PbGormDB) FindOrCreate(message proto.Message) (created bool, err error) {
+	err = p.FindOneByPK(message)
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, ErrNoRowsFound) {
+		return false, err
+	}
+
+	if err := p.Insert(message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// FindOneByPKForUpdate 按主键查询并加行锁（SELECT ... FOR UPDATE），
+// 仅在Transaction内有意义，用于防止并发修改同一玩家数据
+func (p *PbGormDB) FindOneByPKForUpdate(message proto.Message) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+
+	rows, err := p.DB.Table(escapeMySQLName(table.tableName)).
+		Select(table.fieldsListSQL).
+		Where(whereClause, whereArgs...).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Limit(2).
+		Rows()
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	return scanOneProtoRow(rows, message)
+}
+
+// IncrByPK 按主键对数值字段原子加减（UPDATE ... SET f = f + delta），
+// 适合货币/经验等计数器，避免"读-改-写"竞态
+func (p *PbGormDB) IncrByPK(message proto.Message, field string, delta int64) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+	if _, ok := table.fieldNameToDesc[field]; !ok {
+		return fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, field, table.tableName)
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+
+	escapedField := escapeMySQLName(field)
+	return p.DB.Table(escapeMySQLName(table.tableName)).
+		Where(whereClause, whereArgs...).
+		Update(field, gorm.Expr(escapedField+" + ?", delta)).Error
+}
+
+// DecrByPKIfEnough 按主键原子扣减数值字段，余额不足时不扣并返回false
+// （防止负数余额，扣钱/扣道具常用）
+func (p *PbGormDB) DecrByPKIfEnough(message proto.Message, field string, delta int64) (bool, error) {
+	if delta < 0 {
+		return false, fmt.Errorf("delta must be non-negative, got %d", delta)
+	}
+
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := table.fieldNameToDesc[field]; !ok {
+		return false, fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, field, table.tableName)
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return false, err
+	}
+
+	escapedField := escapeMySQLName(field)
+	result := p.DB.Table(escapeMySQLName(table.tableName)).
+		Where(whereClause, whereArgs...).
+		Where(escapedField+" >= ?", delta).
+		Update(field, gorm.Expr(escapedField+" - ?", delta))
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
+func (p *PbGormDB) FindOneByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	rows, err := p.DB.Table(escapeMySQLName(table.tableName)).
+		Select(table.fieldsListSQL).
+		Where(whereClause, whereArgs...).
+		Limit(2).
+		Rows()
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	return scanOneProtoRow(rows, message)
+}
+
+func (p *PbGormDB) FindAll(message proto.Message) error {
+	return p.FindAllByWhereWithArgs(message, "1=1", nil)
+}
+
+func (p *PbGormDB) FindAllByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+	table, listField, err := resolveListTable(p.Tables, message)
+	if err != nil {
+		return err
+	}
+
+	rows, err := p.DB.Table(escapeMySQLName(table.tableName)).
+		Select(table.fieldsListSQL).
+		Where(whereClause, whereArgs...).
+		Rows()
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	return scanProtoRowsToList(rows, message.ProtoReflect().Mutable(listField).List())
+}
+
+// FindAllWithOptions 按条件查询批量数据，支持ORDER BY / LIMIT / OFFSET
+func (p *PbGormDB) FindAllWithOptions(list proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
+	table, listField, err := resolveListTable(p.Tables, list)
+	if err != nil {
+		return err
+	}
+
+	query := p.DB.Table(escapeMySQLName(table.tableName)).
+		Select(table.fieldsListSQL).
+		Where(normalizeWhereClause(whereClause), whereArgs...)
+	if opts.OrderBy != "" {
+		query = query.Order(opts.OrderBy)
+	}
+	if opts.Limit > 0 {
+		query = query.Limit(opts.Limit)
+		if opts.Offset > 0 {
+			query = query.Offset(opts.Offset)
+		}
+	}
+
+	rows, err := query.Rows()
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	return scanProtoRowsToList(rows, list.ProtoReflect().Mutable(listField).List())
+}
+
+// FindPage 分页查询批量数据（pageIndex从1开始）
+func (p *PbGormDB) FindPage(list proto.Message, whereClause string, whereArgs []interface{}, pageIndex, pageSize int) error {
+	if pageIndex < 1 || pageSize < 1 {
+		return fmt.Errorf("invalid page params: pageIndex=%d, pageSize=%d", pageIndex, pageSize)
+	}
+	return p.FindAllWithOptions(list, whereClause, whereArgs, QueryOptions{
+		Limit:  pageSize,
+		Offset: (pageIndex - 1) * pageSize,
+	})
+}
+
+// Count 统计全表行数（message可为行消息或列表消息）
+func (p *PbGormDB) Count(message proto.Message) (int64, error) {
+	return p.CountByWhereWithArgs(message, "", nil)
+}
+
+// CountByWhereWithArgs 按条件统计行数，message可为行消息或列表消息
+func (p *PbGormDB) CountByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) (int64, error) {
+	table, err := resolveAnyTable(p.Tables, message)
+	if err != nil {
+		return 0, err
+	}
+
+	var count int64
+	err = p.DB.Table(escapeMySQLName(table.tableName)).
+		Where(normalizeWhereClause(whereClause), whereArgs...).
+		Count(&count).Error
+	return count, err
+}
+
+// Exists 判断是否存在满足条件的行，message可为行消息或列表消息
+func (p *PbGormDB) Exists(message proto.Message, whereClause string, whereArgs []interface{}) (bool, error) {
+	table, err := resolveAnyTable(p.Tables, message)
+	if err != nil {
+		return false, err
+	}
+
+	rows, err := p.DB.Table(escapeMySQLName(table.tableName)).
+		Select("1").
+		Where(normalizeWhereClause(whereClause), whereArgs...).
+		Limit(1).
+		Rows()
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	exists := rows.Next()
+	return exists, rows.Err()
+}
+
+func (p *PbGormDB) Transaction(fn func(tx *PbGormDB) error) error {
+	return p.DB.Transaction(func(tx *gorm.DB) error {
+		return fn(p.WithDB(tx))
+	})
+}
+
+func (p *PbGormDB) tableForMessage(message proto.Message) (*MessageTable, error) {
+	tableName := GetTableName(message)
+	table, ok := p.Tables[tableName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+	}
+	return table, nil
+}
+
+func (m *MessageTable) messageValues(message proto.Message, includeUnset bool, skipUnsetAutoIncrement bool) (map[string]interface{}, error) {
+	if err := m.validateMessageDescriptor(message); err != nil {
+		return nil, err
+	}
+
+	values := make(map[string]interface{}, m.Descriptor.Fields().Len())
+	reflection := message.ProtoReflect()
+
+	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
+		field := m.Descriptor.Fields().Get(i)
+		fieldName := string(field.Name())
+
+		if !includeUnset && !reflection.Has(field) {
+			continue
+		}
+		if skipUnsetAutoIncrement && m.isAutoIncrementField(fieldName) && !reflection.Has(field) {
+			continue
+		}
+
+		val, err := pbconv.SerializeFieldAsString(message, field)
+		if err != nil {
+			return nil, fmt.Errorf("serialize field %s: %w", field.Name(), err)
+		}
+		values[fieldName] = val
+	}
+
+	return values, nil
+}
+
+func (m *MessageTable) validateMessageDescriptor(message proto.Message) error {
+	if message == nil {
+		return fmt.Errorf("message cannot be nil")
+	}
+	if message.ProtoReflect().Descriptor() != m.Descriptor {
+		return fmt.Errorf("message descriptor %s does not match table %s", message.ProtoReflect().Descriptor().FullName(), m.tableName)
+	}
+	return nil
+}
+
+func (m *MessageTable) primaryKeyValues(message proto.Message) ([]interface{}, error) {
+	if err := m.validateMessageDescriptor(message); err != nil {
+		return nil, err
+	}
+	if len(m.primaryKey) == 0 {
+		return nil, ErrPrimaryKeyNotFound
+	}
+
+	values := make([]interface{}, 0, len(m.primaryKey))
+	for _, primaryKey := range m.primaryKey {
+		field, ok := m.fieldNameToDesc[primaryKey]
+		if !ok {
+			return nil, fmt.Errorf("%w: primary key %s in table %s", ErrFieldNotFound, primaryKey, m.tableName)
+		}
+
+		val, err := pbconv.SerializeFieldAsString(message, field)
+		if err != nil {
+			return nil, fmt.Errorf("serialize primary key %s: %w", primaryKey, err)
+		}
+		values = append(values, val)
+	}
+	return values, nil
+}
+
+func (m *MessageTable) primaryKeyWhere(message proto.Message) (string, []interface{}, error) {
+	whereArgs, err := m.primaryKeyValues(message)
+	if err != nil {
+		return "", nil, err
+	}
+
+	whereClause := ""
+	for i, primaryKey := range m.primaryKey {
+		if i > 0 {
+			whereClause += " AND "
+		}
+		whereClause += fmt.Sprintf("%s = ?", escapeMySQLName(primaryKey))
+	}
+
+	return whereClause, whereArgs, nil
+}
+
+func scanOneProtoRow(rows *sql.Rows, message proto.Message) error {
+	found := false
+	for rows.Next() {
+		if found {
+			return ErrMultipleRowsFound
+		}
+
+		result, err := scanRowStrings(rows)
+		if err != nil {
+			return err
+		}
+		if err := pbconv.ParseFromString(message, result); err != nil {
+			return err
+		}
+		found = true
+	}
+
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	if !found {
+		return ErrNoRowsFound
+	}
+
+	return nil
+}
+
+func scanRowStrings(rows *sql.Rows) ([]string, error) {
+	columns, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+
+	columnValues := make([][]byte, len(columns))
+	scans := make([]interface{}, len(columns))
+	for i := range columnValues {
+		scans[i] = &columnValues[i]
+	}
+
+	if err := rows.Scan(scans...); err != nil {
+		return nil, err
+	}
+
+	result := make([]string, len(columns))
+	for i, v := range columnValues {
+		result[i] = string(v)
+	}
+
+	return result, nil
+}

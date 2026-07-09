@@ -5,45 +5,41 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"reflect"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/go-sql-driver/mysql"
 	"github.com/luyuancpp/proto2mysql/pbconv"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
-	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
 // 常量定义
 const (
-	PrimaryKeyIndex    = 0
 	BatchInsertMaxSize = 1000 // 批量插入最大条数
-	// MySQL关键字列表（增强版）
+	// MySQL关键字列表
 	mysqlKeywordPattern = `^(SELECT|INSERT|UPDATE|DELETE|FROM|WHERE|AND|OR|JOIN|ON|IN|NOT|NULL|PRIMARY|KEY|INDEX|UNIQUE|AUTO_INCREMENT|INT|VARCHAR|TEXT|BLOB|DATETIME|TIMESTAMP|FLOAT|DOUBLE|BOOL|TINYINT|BIGINT)$`
 )
 
 var (
-	// 编译MySQL关键字正则
+	// keywordRegex 用于识别与MySQL关键字冲突的标识符
 	keywordRegex = regexp.MustCompile(mysqlKeywordPattern)
-	t            = timestamppb.Timestamp{}
-	// 预定义Timestamp类型的全名
-	timestampFullName       = t.ProtoReflect().Descriptor().FullName()
-	ErrTableNotFound        = errors.New("table not found")
-	ErrNoRepeatedField      = errors.New("message has no repeated field")
-	ErrMultipleRepeated     = errors.New("message has multiple repeated fields")
-	ErrPrimaryKeyNotFound   = errors.New("primary key not found")
-	ErrFieldNotFound        = errors.New("field not found in message")
-	ErrInvalidSQLTemplate   = errors.New("invalid SQL template")
-	ErrTypeConversionFailed = errors.New("type conversion failed")
-	ErrKeywordConflict      = errors.New("field name conflicts with MySQL keyword")
-	ErrMultipleRowsFound    = errors.New("multiple rows found")
-	ErrNoRowsFound          = errors.New("no rows found")
-	ErrBatchSizeExceeded    = fmt.Errorf("batch size exceeds maximum %d", BatchInsertMaxSize)
+	// timestampFullName 是google.protobuf.Timestamp的全名，用于字段类型判断
+	timestampFullName = (&timestamppb.Timestamp{}).ProtoReflect().Descriptor().FullName()
+
+	ErrTableNotFound      = errors.New("table not found")
+	ErrNoRepeatedField    = errors.New("message has no repeated field")
+	ErrMultipleRepeated   = errors.New("message has multiple repeated fields")
+	ErrPrimaryKeyNotFound = errors.New("primary key not found")
+	ErrFieldNotFound      = errors.New("field not found in message")
+	ErrMultipleRowsFound  = errors.New("multiple rows found")
+	ErrNoRowsFound        = errors.New("no rows found")
+	ErrBatchSizeExceeded  = fmt.Errorf("batch size exceeds maximum %d", BatchInsertMaxSize)
 )
 
 // SqlWithArgs 存储带?占位符的SQL和对应的参数列表
@@ -52,43 +48,34 @@ type SqlWithArgs struct {
 	Args []interface{} // 与占位符一一对应的参数值
 }
 
-// MessageTable 存储Protobuf消息与MySQL表的映射关系
+// MessageTable 存储Protobuf消息与MySQL表的映射关系及预生成的SQL片段
 type MessageTable struct {
-	tableName                    string
-	defaultInstance              proto.Message
-	options                      protoreflect.Message
-	primaryKeyField              protoreflect.FieldDescriptor
-	autoIncrement                uint64
-	fields                       map[int]string // 字段索引到名称的映射
-	primaryKey                   []string       // 主键字段列表
-	indexes                      []string       // 普通索引（逗号分隔字段）
-	uniqueKeys                   string         // 唯一键（逗号分隔字段）
-	autoIncreaseKey              string         // 自增字段名
-	Descriptor                   protoreflect.MessageDescriptor
+	tableName       string
+	Descriptor      protoreflect.MessageDescriptor
+	primaryKey      []string // 主键字段列表
+	primaryKeyField protoreflect.FieldDescriptor
+	indexes         []string // 普通索引（逗号分隔字段）
+	uniqueKeys      string   // 唯一键（逗号分隔字段）
+	autoIncreaseKey string   // 自增字段名
+	nullableFields  []string // 允许为NULL的字段
+
+	// 预生成的SQL片段（Init时构建，之后只读）
+	fieldsListSQL                string
+	selectFieldsSQL              string
 	selectAllSQLWithSemicolon    string
 	selectAllSQLWithoutSemicolon string
-	selectFieldsSQL              string
-	fieldsListSQL                string
-	replaceSQL                   string
-	insertSQL                    string
-	insertSQLTemplate            string   // 缓存INSERT模板
-	deleteByPKTemplate           string   // 缓存按主键删除模板
-	nullableFields               []string // 允许为NULL的字段
+	insertSQLTemplate            string
+	replaceSQLPrefix             string
 
-	// 性能优化：缓存字段名到描述符的映射
+	// fieldNameToDesc 缓存字段名到描述符的映射
 	fieldNameToDesc map[string]protoreflect.FieldDescriptor
-	// 表结构信息缓存（字段名到类型）
+	// cachedColumns 缓存数据库中的表结构（字段名->类型）
 	cachedColumns map[string]string
 	columnsMu     sync.RWMutex // 保护cachedColumns的并发安全
 }
 
 func (m *MessageTable) isNullableField(fieldName string) bool {
-	for _, nullable := range m.nullableFields {
-		if nullable == fieldName {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(m.nullableFields, fieldName)
 }
 
 func (m *MessageTable) isAutoIncrementField(fieldName string) bool {
@@ -138,22 +125,67 @@ func (m *MessageTable) getMySQLFieldType(fieldDesc protoreflect.FieldDescriptor)
 	return baseType
 }
 
-// PbMysqlDB 管理所有表的数据库实例（移除事务相关）
+// PbMysqlDB 管理所有表的数据库实例
 type PbMysqlDB struct {
-	Tables        map[string]*MessageTable
-	DB            *sql.DB
-	DBName        string
-	sqlTemplateMu sync.RWMutex // 保护SQL模板的并发安全
-	// 性能优化：缓存表是否存在的结果
+	Tables map[string]*MessageTable
+	DB     *sql.DB
+	DBName string
+	// tx 非空时所有增删改查走事务（由RunInTransaction设置）
+	tx *sql.Tx
+	// cache 可选的cache-aside缓存（EnableCache注入）；nil时全部直读DB
+	cache    Cache
+	cacheTTL time.Duration
+	// pendingCacheDels 事务内暂存待删除的缓存key，提交成功后统一删除
+	pendingCacheDels []string
+	// tableExistsCache 缓存表是否存在的查询结果
 	tableExistsCache map[string]bool
 	tableExistsMu    sync.RWMutex
+}
+
+// sqlExecutor 统一*sql.DB与*sql.Tx的执行接口
+type sqlExecutor interface {
+	Exec(query string, args ...interface{}) (sql.Result, error)
+	Query(query string, args ...interface{}) (*sql.Rows, error)
+	QueryRow(query string, args ...interface{}) *sql.Row
+}
+
+// conn 返回当前执行器：事务内返回tx，否则返回DB
+func (p *PbMysqlDB) conn() sqlExecutor {
+	if p.tx != nil {
+		return p.tx
+	}
+	return p.DB
+}
+
+// RunInTransaction 在事务中执行fn：fn收到的tx可直接使用全部增删改查接口，
+// fn返回错误时自动回滚，否则提交。适合“扣货币+发道具”等需要原子性的游戏逻辑。
+// 若启用了缓存，事务内的缓存失效会延迟到提交成功后执行（回滚不删缓存）。
+func (p *PbMysqlDB) RunInTransaction(fn func(tx *PbMysqlDB) error) error {
+	var txDB *PbMysqlDB
+	err := p.Transaction(func(sqlTx *sql.Tx) error {
+		txDB = &PbMysqlDB{
+			Tables:           p.Tables,
+			DB:               p.DB,
+			DBName:           p.DBName,
+			tx:               sqlTx,
+			cache:            p.cache,
+			cacheTTL:         p.cacheTTL,
+			tableExistsCache: make(map[string]bool),
+		}
+		return fn(txDB)
+	})
+	if err == nil && txDB != nil {
+		// 提交成功后统一失效缓存（先写库后删缓存）
+		p.cacheDelKeys(txDB.pendingCacheDels...)
+	}
+	return err
 }
 
 // OpenDB 打开数据库连接并切换数据库
 func (p *PbMysqlDB) OpenDB(db *sql.DB, dbname string) error {
 	p.DB = db
 	p.DBName = dbname
-	_, err := p.DB.Exec("USE " + p.DBName)
+	_, err := p.DB.Exec("USE " + escapeMySQLName(p.DBName))
 	return err
 }
 
@@ -271,12 +303,9 @@ func isTypeMatch(currentType, targetType string) bool {
 	return true
 }
 
-// escapeMySQLName 处理MySQL关键字冲突
+// escapeMySQLName 将MySQL标识符整体转义，兼容包含点号的protobuf full name表名。
 func escapeMySQLName(name string) string {
-	if keywordRegex.MatchString(strings.ToUpper(name)) {
-		return fmt.Sprintf("`%s`", name)
-	}
-	return name
+	return "`" + strings.ReplaceAll(name, "`", "``") + "`"
 }
 
 // GetCreateTableSQL 生成创建表的SQL语句
@@ -309,10 +338,10 @@ func (m *MessageTable) GetCreateTableSQL() string {
 			cols := strings.Split(indexCols, ",")
 			quotedCols := make([]string, len(cols))
 			for i, col := range cols {
-				quotedCols[i] = escapeMySQLName(col)
+				quotedCols[i] = escapeMySQLName(strings.TrimSpace(col))
 			}
 			indexName := fmt.Sprintf("idx_%s_%d", m.tableName, idx)
-			indexes = append(indexes, fmt.Sprintf("  INDEX %s (%s)", indexName, strings.Join(quotedCols, ",")))
+			indexes = append(indexes, fmt.Sprintf("  INDEX %s (%s)", escapeMySQLName(indexName), strings.Join(quotedCols, ",")))
 		}
 	}
 
@@ -320,9 +349,9 @@ func (m *MessageTable) GetCreateTableSQL() string {
 		uniqueCols := strings.Split(m.uniqueKeys, ",")
 		quotedUniqueCols := make([]string, len(uniqueCols))
 		for i, col := range uniqueCols {
-			quotedUniqueCols[i] = escapeMySQLName(col)
+			quotedUniqueCols[i] = escapeMySQLName(strings.TrimSpace(col))
 		}
-		indexes = append(indexes, fmt.Sprintf("  UNIQUE KEY uk_%s (%s)", m.tableName, strings.Join(quotedUniqueCols, ",")))
+		indexes = append(indexes, fmt.Sprintf("  UNIQUE KEY %s (%s)", escapeMySQLName("uk_"+m.tableName), strings.Join(quotedUniqueCols, ",")))
 	}
 
 	stmt += strings.Join(fields, ",\n")
@@ -393,135 +422,16 @@ func (p *PbMysqlDB) clearColumnCache(tableName string) {
 	}
 }
 
-// CreateOrUpdateTable 尝试创建表，失败则自动更新表结构
+// CreateOrUpdateTable 创建表或同步已有表字段结构。
 func (p *PbMysqlDB) CreateOrUpdateTable(m proto.Message) error {
 	tableName := GetTableName(m)
-	table, ok := p.Tables[tableName]
-	if !ok {
+	if _, ok := p.Tables[tableName]; !ok {
 		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 	}
-
-	// 先尝试创建表
-	createSQL := table.GetCreateTableSQL()
-	_, err := p.DB.Exec(createSQL)
-	if err == nil {
-		// 创建成功，更新缓存
-		p.updateTableExistsCache(tableName, true)
-		return nil
-	}
-
-	// 创建失败，判断是否需要更新表结构
-	// 常见失败原因：表已存在、字段冲突等
-	log.Printf("创建表 %s 失败: %v，尝试更新表结构...", tableName, err)
-
-	// 强制更新表结构（无论表是否存在）
 	return p.UpdateTableField(m)
 }
 
-// list 必须是一个包含 repeated 字段的 protobuf 消息（如 GolangTestList）
-func (db *PbMysqlDB) scanRowsToList(rows *sql.Rows, list proto.Message) error {
-	listVal := reflect.ValueOf(list)
-	if listVal.Kind() != reflect.Ptr {
-		return fmt.Errorf("list must be a pointer to a proto message list")
-	}
-	listVal = listVal.Elem()
-	if listVal.Kind() != reflect.Struct {
-		return fmt.Errorf("list must be a struct (proto message list)")
-	}
-
-	// 1. 统一获取 repeated 字段的元素类型（*T）
-	elemType, err := GetRepeatedFieldElementType(list)
-	if err != nil {
-		return fmt.Errorf("failed to get repeated field element type: %w", err)
-	}
-
-	// 2. 查找列表中的 repeated 字段（切片）
-	var field reflect.Value
-	listType := listVal.Type()
-	for i := 0; i < listType.NumField(); i++ {
-		fieldVal := listVal.Field(i)
-		if fieldVal.Kind() == reflect.Slice && fieldVal.Type().Elem() == elemType {
-			field = fieldVal
-			break
-		}
-	}
-	if !field.IsValid() {
-		return fmt.Errorf("repeated field not found in list message")
-	}
-
-	// 3. 获取结果集字段名（用于日志调试）
-	cols, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("get columns failed: %w", err)
-	}
-
-	// 4. 遍历每行数据，通过 pbconv 反序列化
-	for rows.Next() {
-		// 创建当前行的扫描目标（存储字符串数组，适配 pbconv.ParseFromString）
-		rowStrings := make([]string, len(cols))
-		rowValues := make([]interface{}, len(cols))
-		for i := range rowValues {
-			rowValues[i] = &rowStrings[i] // 直接扫描到字符串
-		}
-
-		// 扫描当前行到字符串数组
-		if err := rows.Scan(rowValues...); err != nil {
-			return fmt.Errorf("scan row failed: %w", err)
-		}
-
-		// 创建元素实例并通过 pbconv 反序列化
-		elem := reflect.New(elemType.Elem()).Interface().(proto.Message)
-		if err := pbconv.ParseFromString(elem, rowStrings); err != nil {
-			return fmt.Errorf("parse row to message failed: %w, row: %v", err, rowStrings)
-		}
-
-		// 添加到列表
-		field.Set(reflect.Append(field, reflect.ValueOf(elem)))
-	}
-
-	// 检查迭代错误
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error: %w", err)
-	}
-
-	return nil
-}
-
-// 辅助函数：根据字段类型返回对应的扫描目标指针（修正 Kind 获取方式）
-func getScanTarget(fieldValue protoreflect.Value, kind protoreflect.Kind) interface{} {
-	// 处理常见类型（根据你的 protobuf 字段类型扩展）
-	switch kind { // 使用传入的 kind，而非 fieldValue.Kind()
-	case protoreflect.Uint32Kind:
-		var v uint32
-		return &v
-	case protoreflect.Uint64Kind:
-		var v uint64
-		return &v
-	case protoreflect.StringKind:
-		var v string
-		return &v
-	case protoreflect.Int32Kind:
-		var v int32
-		return &v
-	case protoreflect.Int64Kind:
-		var v int64
-		return &v
-	case protoreflect.BoolKind:
-		var v bool
-		return &v
-	// 处理嵌套消息（假设嵌套消息以 JSON 字符串存储在数据库中）
-	case protoreflect.MessageKind:
-		var v string // 数据库中存储为 JSON 字符串
-		return &v
-	default:
-		// 对于未处理的类型，使用 interface{} 接收
-		var v interface{}
-		return &v
-	}
-}
-
-// UpdateTableField 同步表字段
-// UpdateTableField 同步表字段（增强版：无论表是否存在都尝试处理）
+// UpdateTableField 同步表字段（表不存在则创建，存在则对齐字段类型）
 func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 	tableName := GetTableName(m)
 	table, ok := p.Tables[tableName]
@@ -625,6 +535,10 @@ func (p *PbMysqlDB) updateTableExistsCache(tableName string, exists bool) {
 
 // GetInsertSQLWithArgs 生成参数化的INSERT语句
 func (m *MessageTable) GetInsertSQLWithArgs(message proto.Message) (*SqlWithArgs, error) {
+	if err := m.validateMessageDescriptor(message); err != nil {
+		return nil, err
+	}
+
 	var args []interface{}
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		fieldDesc := m.Descriptor.Fields().Get(i)
@@ -646,10 +560,9 @@ func (m *MessageTable) GetBatchInsertSQLWithArgs(messages []proto.Message) (*Sql
 		return nil, ErrBatchSizeExceeded
 	}
 
-	firstDesc := messages[0].ProtoReflect().Descriptor()
-	for _, msg := range messages[1:] {
-		if msg.ProtoReflect().Descriptor() != firstDesc {
-			return nil, errors.New("messages have different descriptors")
+	for _, msg := range messages {
+		if err := m.validateMessageDescriptor(msg); err != nil {
+			return nil, err
 		}
 	}
 
@@ -676,6 +589,18 @@ func (m *MessageTable) GetBatchInsertSQLWithArgs(messages []proto.Message) (*Sql
 		m.fieldsListSQL,
 		strings.Join(valueGroups, "), ("))
 	return &SqlWithArgs{Sql: sql, Args: allArgs}, nil
+}
+
+// GetBatchReplaceSQLWithArgs 生成批量REPLACE语句
+func (m *MessageTable) GetBatchReplaceSQLWithArgs(messages []proto.Message) (*SqlWithArgs, error) {
+	insertSQL, err := m.GetBatchInsertSQLWithArgs(messages)
+	if err != nil {
+		return nil, err
+	}
+	return &SqlWithArgs{
+		Sql:  "REPLACE" + strings.TrimPrefix(insertSQL.Sql, "INSERT"),
+		Args: insertSQL.Args,
+	}, nil
 }
 
 // GetInsertOnDupUpdateSQLWithArgs 生成参数化的INSERT...ON DUPLICATE KEY UPDATE语句
@@ -749,7 +674,7 @@ func (p *PbMysqlDB) Insert(message proto.Message) error {
 		return fmt.Errorf("generate insert SQL for table %s: %w", tableName, err)
 	}
 
-	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	_, err = p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
 		return fmt.Errorf("exec insert for table %s: sql=%s, args=%v, err=%w",
 			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
@@ -782,7 +707,7 @@ func (p *PbMysqlDB) BatchInsert(messages []proto.Message) error {
 			return fmt.Errorf("generate batch insert SQL for table %s: %w", tableName, err)
 		}
 
-		_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+		_, err = p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 		if err != nil {
 			return fmt.Errorf("exec batch insert for table %s: sql=%s, args len=%d, err=%w",
 				tableName, sqlWithArgs.Sql, len(sqlWithArgs.Args), err)
@@ -805,11 +730,12 @@ func (p *PbMysqlDB) InsertOnDupUpdate(message proto.Message) error {
 		return fmt.Errorf("generate insert on dup update SQL for table %s: %w", tableName, err)
 	}
 
-	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	_, err = p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
 		return fmt.Errorf("exec insert on dup update for table %s: sql=%s, args=%v, err=%w",
 			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
 	}
+	p.invalidateMessages(table, message)
 	return nil
 }
 
@@ -838,16 +764,13 @@ func (m *MessageTable) GetSelectSQL(includeSemicolon bool) string {
 
 // GetDeleteSQLWithArgs 生成参数化的按主键删除语句
 func (m *MessageTable) GetDeleteSQLWithArgs(message proto.Message) (*SqlWithArgs, error) {
-	if m.primaryKeyField == nil {
-		return nil, ErrPrimaryKeyNotFound
-	}
-	val, err := pbconv.SerializeFieldAsString(message, m.primaryKeyField)
+	whereClause, whereArgs, err := m.primaryKeyWhere(message)
 	if err != nil {
-		return nil, fmt.Errorf("serialize primary key: %w", err)
+		return nil, err
 	}
 	return &SqlWithArgs{
-		Sql:  m.deleteByPKTemplate,
-		Args: []interface{}{val},
+		Sql:  fmt.Sprintf("DELETE FROM %s WHERE %s", escapeMySQLName(m.tableName), whereClause),
+		Args: whereArgs,
 	}, nil
 }
 
@@ -870,10 +793,116 @@ func (p *PbMysqlDB) Delete(message proto.Message) error {
 		return fmt.Errorf("generate delete SQL for table %s: %w", tableName, err)
 	}
 
-	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	_, err = p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
 		return fmt.Errorf("exec delete for table %s: sql=%s, args=%v, err=%w",
 			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
+	}
+	p.invalidateMessages(table, message)
+	return nil
+}
+
+// DeleteByWhereWithArgs 执行参数化的自定义WHERE删除操作
+func (p *PbMysqlDB) DeleteByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	sqlWithArgs := table.GetDeleteSQLByWhereWithArgs(whereClause, whereArgs)
+	if _, err := p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...); err != nil {
+		return fmt.Errorf("exec delete by where for table %s: %w", table.tableName, err)
+	}
+	return nil
+}
+
+// DeleteByKV 按单个字段等值条件删除
+func (p *PbMysqlDB) DeleteByKV(message proto.Message, key string, value interface{}) error {
+	return p.DeleteByWhereWithArgs(message, escapeMySQLName(key)+" = ?", []interface{}{value})
+}
+
+// BatchDelete 按主键批量删除（DELETE ... WHERE pk IN (...)，自动分批）
+func (p *PbMysqlDB) BatchDelete(messages []proto.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	table, err := p.tableForMessage(messages[0])
+	if err != nil {
+		return err
+	}
+	if table.primaryKeyField == nil {
+		return ErrPrimaryKeyNotFound
+	}
+	for _, msg := range messages {
+		if err := table.validateMessageDescriptor(msg); err != nil {
+			return err
+		}
+	}
+
+	pkNames := make([]string, len(table.primaryKey))
+	for i, primaryKey := range table.primaryKey {
+		pkNames[i] = escapeMySQLName(primaryKey)
+	}
+
+	for i := 0; i < len(messages); i += BatchInsertMaxSize {
+		end := i + BatchInsertMaxSize
+		if end > len(messages) {
+			end = len(messages)
+		}
+		batch := messages[i:end]
+
+		var args []interface{}
+		tuples := make([]string, 0, len(batch))
+		for _, msg := range batch {
+			values, err := table.primaryKeyValues(msg)
+			if err != nil {
+				return err
+			}
+			args = append(args, values...)
+			tuples = append(tuples, "("+buildPlaceholders(len(table.primaryKey))+")")
+		}
+
+		where := fmt.Sprintf("(%s) IN (%s)", strings.Join(pkNames, ", "), strings.Join(tuples, ", "))
+		if err := p.DeleteByWhereWithArgs(messages[0], where, args); err != nil {
+			return err
+		}
+	}
+	p.invalidateMessages(table, messages...)
+	return nil
+}
+
+// Update 按主键更新消息中已设置的字段（UPDATE ... WHERE pk = ?）
+func (p *PbMysqlDB) Update(message proto.Message) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	sqlWithArgs, err := table.GetUpdateSQLWithArgs(message)
+	if err != nil {
+		return fmt.Errorf("generate update SQL for table %s: %w", table.tableName, err)
+	}
+	if _, err := p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...); err != nil {
+		return fmt.Errorf("exec update for table %s: %w", table.tableName, err)
+	}
+	p.invalidateMessages(table, message)
+	return nil
+}
+
+// UpdateByWhereWithArgs 按自定义WHERE条件更新消息中已设置的字段
+func (p *PbMysqlDB) UpdateByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	sqlWithArgs, err := table.GetUpdateSQLByWhereWithArgs(message, whereClause, whereArgs)
+	if err != nil {
+		return fmt.Errorf("generate update SQL for table %s: %w", table.tableName, err)
+	}
+	if _, err := p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...); err != nil {
+		return fmt.Errorf("exec update by where for table %s: %w", table.tableName, err)
 	}
 	return nil
 }
@@ -891,15 +920,16 @@ func (m *MessageTable) GetReplaceSQLWithArgs(message proto.Message) (*SqlWithArg
 	}
 
 	placeholders := buildPlaceholders(len(args))
-	sqlStmt := fmt.Sprintf("%s%s)", m.replaceSQL, placeholders)
+	sqlStmt := fmt.Sprintf("%s%s)", m.replaceSQLPrefix, placeholders)
 
 	return &SqlWithArgs{Sql: sqlStmt, Args: args}, nil
 }
 
-// GetUpdateSetWithArgs 生成参数化的SET子句和参数
-func (m *MessageTable) GetUpdateSetWithArgs(message proto.Message) (setClause string, args []interface{}, err error) {
-	needComma := false
+// GetUpdateSetWithArgs 生成参数化的SET子句和参数（仅包含已设置的字段）
+func (m *MessageTable) GetUpdateSetWithArgs(message proto.Message) (string, []interface{}, error) {
 	reflection := message.ProtoReflect()
+	var clauses []string
+	var args []interface{}
 
 	for i := 0; i < m.Descriptor.Fields().Len(); i++ {
 		field := m.Descriptor.Fields().Get(i)
@@ -912,17 +942,11 @@ func (m *MessageTable) GetUpdateSetWithArgs(message proto.Message) (setClause st
 			return "", nil, fmt.Errorf("serialize update field %s: %w", field.Name(), err)
 		}
 
-		if needComma {
-			setClause += ", "
-		} else {
-			needComma = true
-		}
-
-		setClause += fmt.Sprintf(" %s = ?", escapeMySQLName(string(field.Name())))
+		clauses = append(clauses, escapeMySQLName(string(field.Name()))+" = ?")
 		args = append(args, val)
 	}
 
-	return setClause, args, nil
+	return strings.Join(clauses, ", "), args, nil
 }
 
 // GetUpdateSQLWithArgs 生成参数化的按主键更新语句
@@ -935,39 +959,13 @@ func (m *MessageTable) GetUpdateSQLWithArgs(message proto.Message) (*SqlWithArgs
 		return nil, errors.New("no fields to update")
 	}
 
-	var whereClause string
-	var whereArgs []interface{}
-	needComma := false
-
-	for _, primaryKey := range m.primaryKey {
-		field, ok := m.fieldNameToDesc[primaryKey]
-		if !ok {
-			return nil, fmt.Errorf("%w: primary key %s in table %s", ErrFieldNotFound, primaryKey, m.tableName)
-		}
-
-		val, err := pbconv.SerializeFieldAsString(message, field)
-		if err != nil {
-			return nil, fmt.Errorf("serialize primary key %s: %w", primaryKey, err)
-		}
-
-		if needComma {
-			whereClause += " AND "
-		} else {
-			needComma = true
-		}
-
-		whereClause += fmt.Sprintf("%s = ?", escapeMySQLName(primaryKey))
-		whereArgs = append(whereArgs, val)
-	}
-
-	if whereClause == "" {
-		return nil, ErrPrimaryKeyNotFound
+	whereClause, whereArgs, err := m.primaryKeyWhere(message)
+	if err != nil {
+		return nil, err
 	}
 
 	fullSQL := fmt.Sprintf("UPDATE %s SET %s WHERE %s", escapeMySQLName(m.tableName), setClause, whereClause)
-	fullArgs := append(setArgs, whereArgs...)
-
-	return &SqlWithArgs{Sql: fullSQL, Args: fullArgs}, nil
+	return &SqlWithArgs{Sql: fullSQL, Args: append(setArgs, whereArgs...)}, nil
 }
 
 // GetUpdateSQLByWhereWithArgs 生成参数化的自定义WHERE更新语句
@@ -986,45 +984,31 @@ func (m *MessageTable) GetUpdateSQLByWhereWithArgs(message proto.Message, whereC
 	return &SqlWithArgs{Sql: fullSQL, Args: fullArgs}, nil
 }
 
-// Init 初始化MessageTable的SQL片段
+// Init 预生成MessageTable的SQL片段（注册表时调用一次）
 func (m *MessageTable) Init() {
-	m.fieldNameToDesc = make(map[string]protoreflect.FieldDescriptor)
-
-	needComma := false
 	desc := m.Descriptor
-	for i := 0; i < desc.Fields().Len(); i++ {
+	fieldCount := desc.Fields().Len()
+
+	m.fieldNameToDesc = make(map[string]protoreflect.FieldDescriptor, fieldCount)
+	names := make([]string, 0, fieldCount)
+	for i := 0; i < fieldCount; i++ {
 		field := desc.Fields().Get(i)
 		fieldName := string(field.Name())
 		m.fieldNameToDesc[fieldName] = field
-
-		if needComma {
-			m.fieldsListSQL += ", "
-		} else {
-			needComma = true
-		}
-		m.fieldsListSQL += escapeMySQLName(fieldName)
+		names = append(names, escapeMySQLName(fieldName))
 	}
+	m.fieldsListSQL = strings.Join(names, ", ")
 
-	m.selectFieldsSQL = "SELECT " + m.fieldsListSQL + " FROM " + escapeMySQLName(m.tableName)
+	escapedTable := escapeMySQLName(m.tableName)
+	m.selectFieldsSQL = "SELECT " + m.fieldsListSQL + " FROM " + escapedTable
 	m.selectAllSQLWithSemicolon = m.selectFieldsSQL + ";"
 	m.selectAllSQLWithoutSemicolon = m.selectFieldsSQL + " "
-
-	fieldCount := strings.Count(m.fieldsListSQL, ",") + 1
-	placeholders := buildPlaceholders(fieldCount)
 	m.insertSQLTemplate = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
-		escapeMySQLName(m.tableName),
-		m.fieldsListSQL,
-		placeholders)
-	m.replaceSQL = "REPLACE INTO " + escapeMySQLName(m.tableName) + " (" + m.fieldsListSQL + ") VALUES ("
-	m.insertSQL = "INSERT INTO " + escapeMySQLName(m.tableName) + " (" + m.fieldsListSQL + ") VALUES "
+		escapedTable, m.fieldsListSQL, buildPlaceholders(fieldCount))
+	m.replaceSQLPrefix = "REPLACE INTO " + escapedTable + " (" + m.fieldsListSQL + ") VALUES ("
 
 	if len(m.primaryKey) > 0 {
-		m.primaryKeyField = m.Descriptor.Fields().ByName(protoreflect.Name(m.primaryKey[PrimaryKeyIndex]))
-		if m.primaryKeyField != nil {
-			m.deleteByPKTemplate = fmt.Sprintf("DELETE FROM %s WHERE %s = ?",
-				escapeMySQLName(m.tableName),
-				escapeMySQLName(string(m.primaryKeyField.Name())))
-		}
+		m.primaryKeyField = desc.Fields().ByName(protoreflect.Name(m.primaryKey[0]))
 	}
 }
 
@@ -1069,17 +1053,215 @@ func (p *PbMysqlDB) Save(message proto.Message) error {
 		return fmt.Errorf("generate replace SQL for table %s: %w", tableName, err)
 	}
 
-	_, err = p.DB.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	_, err = p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
 		return fmt.Errorf("exec replace for table %s: sql=%s, args=%v, err=%w",
 			tableName, sqlWithArgs.Sql, sqlWithArgs.Args, err)
 	}
+	p.invalidateMessages(table, message)
 	return nil
 }
 
-// FindOneByKV 执行参数化的KV查询
+// BatchSave 执行批量REPLACE操作（自动分批）
+func (p *PbMysqlDB) BatchSave(messages []proto.Message) error {
+	if len(messages) == 0 {
+		return nil
+	}
+
+	table, err := p.tableForMessage(messages[0])
+	if err != nil {
+		return err
+	}
+	for _, msg := range messages {
+		if err := table.validateMessageDescriptor(msg); err != nil {
+			return err
+		}
+	}
+
+	for i := 0; i < len(messages); i += BatchInsertMaxSize {
+		end := i + BatchInsertMaxSize
+		if end > len(messages) {
+			end = len(messages)
+		}
+
+		sqlWithArgs, err := table.GetBatchReplaceSQLWithArgs(messages[i:end])
+		if err != nil {
+			return fmt.Errorf("generate batch replace SQL for table %s: %w", table.tableName, err)
+		}
+		if _, err := p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...); err != nil {
+			return fmt.Errorf("exec batch replace for table %s: args len=%d, err=%w",
+				table.tableName, len(sqlWithArgs.Args), err)
+		}
+	}
+	p.invalidateMessages(table, messages...)
+	return nil
+}
+
+// FindOneByPK 按消息中的主键值查询单条数据（查到后覆盖message其余字段）。
+// 启用缓存时为cache-aside读路径：先查缓存，未命中读DB后回填。
+func (p *PbMysqlDB) FindOneByPK(message proto.Message) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	// 事务内不走缓存（需要读到事务内未提交的最新值）
+	useCache := p.cacheEnabled() && p.tx == nil
+	if useCache && p.cacheGetProto(table, message) {
+		return nil
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+	if err := p.FindOneByWhereWithArgs(message, whereClause, whereArgs); err != nil {
+		return err
+	}
+
+	if useCache {
+		p.cacheSetProto(table, message)
+	}
+	return nil
+}
+
+// FindOneByPKForUpdate 按主键查询并加行锁（SELECT ... FOR UPDATE），
+// 仅在RunInTransaction内有意义，用于防止并发修改同一玩家数据
+func (p *PbMysqlDB) FindOneByPKForUpdate(message proto.Message) error {
+	if p.tx == nil {
+		return errors.New("FindOneByPKForUpdate must be called inside RunInTransaction")
+	}
+
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+
+	sqlStmt := fmt.Sprintf("%s WHERE %s FOR UPDATE;", table.selectFieldsSQL, whereClause)
+	rows, err := p.conn().Query(sqlStmt, whereArgs...)
+	if err != nil {
+		return fmt.Errorf("exec select for update for table %s: %w", table.tableName, err)
+	}
+	defer rows.Close()
+
+	if err := scanOneProtoRow(rows, message); err != nil {
+		return fmt.Errorf("table %s: %w", table.tableName, err)
+	}
+	return nil
+}
+
+// FindOrCreate 按主键查询，不存在则用message当前值插入（玩家首次登录常用）。
+// 返回created表示是否新建了记录。
+func (p *PbMysqlDB) FindOrCreate(message proto.Message) (created bool, err error) {
+	err = p.FindOneByPK(message)
+	if err == nil {
+		return false, nil
+	}
+	if !errors.Is(err, ErrNoRowsFound) {
+		return false, err
+	}
+
+	if err := p.Insert(message); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+// FindAllByPKIn 按主键批量查询，返回列表（类似Redis MGET：给一批主键，返回命中的行，
+// 不存在的主键自动跳过）
+func (p *PbMysqlDB) FindAllByPKIn(list proto.Message, pkValues []interface{}) error {
+	table, listField, err := resolveListTable(p.Tables, list)
+	if err != nil {
+		return err
+	}
+
+	if len(pkValues) == 0 {
+		list.ProtoReflect().Mutable(listField).List().Truncate(0)
+		return nil
+	}
+	if table.primaryKeyField == nil {
+		return ErrPrimaryKeyNotFound
+	}
+
+	pkName := escapeMySQLName(string(table.primaryKeyField.Name()))
+	where := fmt.Sprintf("%s IN (%s)", pkName, buildPlaceholders(len(pkValues)))
+	return p.FindAllByWhereWithArgs(list, where, pkValues)
+}
+
+// IncrByPK 按主键对数值字段原子加减（UPDATE ... SET f = f + delta），
+// 适合货币/经验等计数器，避免“读-改-写”竞态
+func (p *PbMysqlDB) IncrByPK(message proto.Message, field string, delta int64) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+	if _, ok := table.fieldNameToDesc[field]; !ok {
+		return fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, field, table.tableName)
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+
+	escapedField := escapeMySQLName(field)
+	sqlStmt := fmt.Sprintf("UPDATE %s SET %s = %s + ? WHERE %s",
+		escapeMySQLName(table.tableName), escapedField, escapedField, whereClause)
+	if _, err := p.conn().Exec(sqlStmt, append([]interface{}{delta}, whereArgs...)...); err != nil {
+		return fmt.Errorf("exec incr for table %s: %w", table.tableName, err)
+	}
+	p.invalidateMessages(table, message)
+	return nil
+}
+
+// DecrByPKIfEnough 按主键原子扣减数值字段，余额不足时不扣并返回false
+// （UPDATE ... SET f = f - ? WHERE pk = ? AND f >= ?，防止负数余额，扣钱/扣道具常用）
+func (p *PbMysqlDB) DecrByPKIfEnough(message proto.Message, field string, delta int64) (bool, error) {
+	if delta < 0 {
+		return false, fmt.Errorf("delta must be non-negative, got %d", delta)
+	}
+
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return false, err
+	}
+	if _, ok := table.fieldNameToDesc[field]; !ok {
+		return false, fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, field, table.tableName)
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return false, err
+	}
+
+	escapedField := escapeMySQLName(field)
+	sqlStmt := fmt.Sprintf("UPDATE %s SET %s = %s - ? WHERE %s AND %s >= ?",
+		escapeMySQLName(table.tableName), escapedField, escapedField, whereClause, escapedField)
+	args := append([]interface{}{delta}, whereArgs...)
+	args = append(args, delta)
+
+	result, err := p.conn().Exec(sqlStmt, args...)
+	if err != nil {
+		return false, fmt.Errorf("exec decr for table %s: %w", table.tableName, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected > 0 {
+		p.invalidateMessages(table, message)
+	}
+	return affected > 0, nil
+}
+
+// FindOneByKV 按单个字段等值条件查询单条数据
 func (p *PbMysqlDB) FindOneByKV(message proto.Message, whereKey string, whereVal string) error {
-	return p.FindOneByWhereWithArgs(message, whereKey+" = ?", []interface{}{whereVal})
+	return p.FindOneByWhereWithArgs(message, escapeMySQLName(whereKey)+" = ?", []interface{}{whereVal})
 }
 
 // FindOneByWhereWithArgs 执行参数化的自定义WHERE查询（单条数据）
@@ -1091,177 +1273,263 @@ func (p *PbMysqlDB) FindOneByWhereWithArgs(message proto.Message, whereClause st
 	}
 
 	sqlWithArgs := table.GetSelectSQLByWhereWithArgs(whereClause, whereArgs)
-	rows, err := p.DB.Query(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	rows, err := p.conn().Query(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
 		return fmt.Errorf("exec select for table %s: %w", tableName, err)
 	}
 	defer rows.Close()
 
-	columns, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("get columns for table %s: %w", tableName, err)
+	if err := scanOneProtoRow(rows, message); err != nil {
+		return fmt.Errorf("table %s: %w", tableName, err)
 	}
-
-	columnValues := make([][]byte, len(columns))
-	scans := make([]interface{}, len(columns))
-	for k := range columnValues {
-		scans[k] = &columnValues[k]
-	}
-
-	found := false
-	for rows.Next() {
-		if found {
-			return ErrMultipleRowsFound
-		}
-		if err := rows.Scan(scans...); err != nil {
-			return fmt.Errorf("scan row for table %s: %w", tableName, err)
-		}
-
-		result := make([]string, len(columns))
-		for i, v := range columnValues {
-			result[i] = string(v)
-		}
-
-		if err := pbconv.ParseFromString(message, result); err != nil {
-			return fmt.Errorf("parse row for table %s: %w", tableName, err)
-		}
-		found = true
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error for table %s: %w", tableName, err)
-	}
-	if !found {
-		return ErrNoRowsFound
-	}
-
 	return nil
 }
 
-// FindAll 执行全表查询（批量数据）
+// FindOneByWhereClause 按条件查询单条数据（whereClause为纯条件，无需带WHERE；空串查全表）
+func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause string) error {
+	return p.FindOneByWhereWithArgs(message, normalizeWhereClause(whereClause), nil)
+}
+
+// FindAll 查询全表数据到列表消息（包含单个repeated字段的消息）
 func (p *PbMysqlDB) FindAll(message proto.Message) error {
 	return p.FindAllByWhereWithArgs(message, "1=1", nil)
 }
 
 // FindAllByWhereWithArgs 执行参数化的自定义WHERE查询（批量数据）
 func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
-	reflectionParent := message.ProtoReflect()
-	listField, err := getSingleRepeatedField(message)
+	table, listField, err := resolveListTable(p.Tables, message)
 	if err != nil {
 		return err
 	}
 
-	tableName := string(listField.Message().Name())
-	table, ok := p.Tables[tableName]
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
-	}
-
 	sqlWithArgs := table.GetSelectSQLByWhereWithArgs(whereClause, whereArgs)
-	rows, err := p.DB.Query(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	rows, err := p.conn().Query(sqlWithArgs.Sql, sqlWithArgs.Args...)
 	if err != nil {
-		return fmt.Errorf("exec select all for table %s: %w", tableName, err)
+		return fmt.Errorf("exec select all for table %s: %w", table.tableName, err)
 	}
 	defer rows.Close()
 
-	columns, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("get columns for table %s: %w", tableName, err)
+	listValue := message.ProtoReflect().Mutable(listField).List()
+	if err := scanProtoRowsToList(rows, listValue); err != nil {
+		return fmt.Errorf("table %s: %w", table.tableName, err)
 	}
-
-	columnValues := make([][]byte, len(columns))
-	scans := make([]interface{}, len(columns))
-	for k := range columnValues {
-		scans[k] = &columnValues[k]
-	}
-
-	listValue := reflectionParent.Mutable(listField).List()
-	listValue.Truncate(0)
-
-	for rows.Next() {
-		if err := rows.Scan(scans...); err != nil {
-			return fmt.Errorf("scan row for table %s: %w", tableName, err)
-		}
-
-		result := make([]string, len(columns))
-		for i, v := range columnValues {
-			result[i] = string(v)
-		}
-
-		listElement := listValue.NewElement()
-		if err := pbconv.ParseFromString(listElement.Message().Interface(), result); err != nil {
-			return fmt.Errorf("parse row for table %s: %w", tableName, err)
-		}
-		listValue.Append(listElement)
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error for table %s: %w", tableName, err)
-	}
-
 	return nil
 }
 
-func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause string) error {
-	tableName := GetTableName(message)
-	table, ok := p.Tables[tableName]
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+// FindAllByWhereClause 按条件查询批量数据（whereClause为纯条件，无需带WHERE；空串查全表）
+func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause string) error {
+	return p.FindAllByWhereWithArgs(message, normalizeWhereClause(whereClause), nil)
+}
+
+// FindMultiByWhereWithArgs 与FindAllByWhereWithArgs等价，保留以兼容旧接口
+func (p *PbMysqlDB) FindMultiByWhereWithArgs(list proto.Message, whereClause string, args []interface{}) error {
+	return p.FindAllByWhereWithArgs(list, whereClause, args)
+}
+
+// FindMultiByKV 按单个字段等值条件查询批量数据
+func (p *PbMysqlDB) FindMultiByKV(list proto.Message, key string, value interface{}) error {
+	return p.FindAllByWhereWithArgs(list, escapeMySQLName(key)+" = ?", []interface{}{value})
+}
+
+// FindAllByKVIn 按单个字段的IN条件查询批量数据（WHERE key IN (...)）
+func (p *PbMysqlDB) FindAllByKVIn(list proto.Message, key string, values []interface{}) error {
+	if len(values) == 0 {
+		_, listField, err := resolveListTable(p.Tables, list)
+		if err != nil {
+			return err
+		}
+		list.ProtoReflect().Mutable(listField).List().Truncate(0)
+		return nil
 	}
 
-	// 内部自动拼接 WHERE 关键字（外部无需传入WHERE）
-	whereSQL := "WHERE 1=1"
-	if whereClause != "" {
-		whereSQL = "WHERE " + whereClause
-	}
-	sqlStmt := table.GetSelectSQL(false) + " " + whereSQL + ";"
+	where := fmt.Sprintf("%s IN (%s)", escapeMySQLName(key), buildPlaceholders(len(values)))
+	return p.FindAllByWhereWithArgs(list, where, values)
+}
 
-	rows, err := p.DB.Query(sqlStmt)
+// FindMultiByWhereClause 与FindAllByWhereClause等价，保留以兼容旧接口
+func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause string) error {
+	return p.FindAllByWhereClause(message, whereClause)
+}
+
+// QueryOptions 查询修饰选项，对应MySQL的ORDER BY / LIMIT / OFFSET
+type QueryOptions struct {
+	OrderBy string // 排序表达式，如 "id DESC"（直接拼入SQL，勿传入不可信输入）
+	Limit   int    // 返回行数上限，<=0表示不限制
+	Offset  int    // 跳过的行数，仅在Limit>0时生效
+}
+
+// sqlSuffix 生成ORDER BY/LIMIT/OFFSET后缀（以空格开头，可能为空串）
+func (o QueryOptions) sqlSuffix() string {
+	var b strings.Builder
+	if o.OrderBy != "" {
+		b.WriteString(" ORDER BY ")
+		b.WriteString(o.OrderBy)
+	}
+	if o.Limit > 0 {
+		b.WriteString(" LIMIT ")
+		b.WriteString(strconv.Itoa(o.Limit))
+		if o.Offset > 0 {
+			b.WriteString(" OFFSET ")
+			b.WriteString(strconv.Itoa(o.Offset))
+		}
+	}
+	return b.String()
+}
+
+// FindAllWithOptions 按条件查询批量数据，支持ORDER BY / LIMIT / OFFSET
+func (p *PbMysqlDB) FindAllWithOptions(list proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
+	table, listField, err := resolveListTable(p.Tables, list)
 	if err != nil {
-		return fmt.Errorf("exec select for table %s: %w, SQL: %s", tableName, err, sqlStmt)
+		return err
+	}
+
+	sqlStmt := fmt.Sprintf("%s WHERE %s%s;", table.selectFieldsSQL, normalizeWhereClause(whereClause), opts.sqlSuffix())
+	rows, err := p.conn().Query(sqlStmt, whereArgs...)
+	if err != nil {
+		return fmt.Errorf("exec select for table %s: %w", table.tableName, err)
 	}
 	defer rows.Close()
 
-	// 处理结果集（省略重复代码，与之前一致）
-	columns, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("get columns for table %s: %w", tableName, err)
+	listValue := list.ProtoReflect().Mutable(listField).List()
+	if err := scanProtoRowsToList(rows, listValue); err != nil {
+		return fmt.Errorf("table %s: %w", table.tableName, err)
 	}
-
-	columnValues := make([][]byte, len(columns))
-	scans := make([]interface{}, len(columns))
-	for k := range columnValues {
-		scans[k] = &columnValues[k]
-	}
-
-	found := false
-	for rows.Next() {
-		if found {
-			return ErrMultipleRowsFound
-		}
-		if err := rows.Scan(scans...); err != nil {
-			return fmt.Errorf("scan row for table %s: %w", tableName, err)
-		}
-
-		result := make([]string, len(columns))
-		for i, v := range columnValues {
-			result[i] = string(v)
-		}
-
-		if err := pbconv.ParseFromString(message, result); err != nil {
-			return fmt.Errorf("parse row for table %s: %w", tableName, err)
-		}
-		found = true
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error for table %s: %w", tableName, err)
-	}
-	if !found {
-		return ErrNoRowsFound
-	}
-
 	return nil
+}
+
+// FindPage 分页查询批量数据（pageIndex从1开始）
+func (p *PbMysqlDB) FindPage(list proto.Message, whereClause string, whereArgs []interface{}, pageIndex, pageSize int) error {
+	if pageIndex < 1 || pageSize < 1 {
+		return fmt.Errorf("invalid page params: pageIndex=%d, pageSize=%d", pageIndex, pageSize)
+	}
+	return p.FindAllWithOptions(list, whereClause, whereArgs, QueryOptions{
+		Limit:  pageSize,
+		Offset: (pageIndex - 1) * pageSize,
+	})
+}
+
+// Count 统计全表行数（message可为行消息或列表消息）
+func (p *PbMysqlDB) Count(message proto.Message) (int64, error) {
+	return p.CountByWhereWithArgs(message, "", nil)
+}
+
+// CountByWhereWithArgs 按条件统计行数（SELECT COUNT(*)），message可为行消息或列表消息
+func (p *PbMysqlDB) CountByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) (int64, error) {
+	table, err := resolveAnyTable(p.Tables, message)
+	if err != nil {
+		return 0, err
+	}
+
+	sqlStmt := fmt.Sprintf("SELECT COUNT(*) FROM %s WHERE %s;",
+		escapeMySQLName(table.tableName), normalizeWhereClause(whereClause))
+	var count int64
+	if err := p.conn().QueryRow(sqlStmt, whereArgs...).Scan(&count); err != nil {
+		return 0, fmt.Errorf("count table %s: %w", table.tableName, err)
+	}
+	return count, nil
+}
+
+// Exists 判断是否存在满足条件的行（SELECT 1 ... LIMIT 1），message可为行消息或列表消息
+func (p *PbMysqlDB) Exists(message proto.Message, whereClause string, whereArgs []interface{}) (bool, error) {
+	table, err := resolveAnyTable(p.Tables, message)
+	if err != nil {
+		return false, err
+	}
+
+	sqlStmt := fmt.Sprintf("SELECT 1 FROM %s WHERE %s LIMIT 1;",
+		escapeMySQLName(table.tableName), normalizeWhereClause(whereClause))
+	var one int
+	err = p.conn().QueryRow(sqlStmt, whereArgs...).Scan(&one)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("exists check for table %s: %w", table.tableName, err)
+	}
+	return true, nil
+}
+
+// Transaction 在事务中执行fn：fn返回错误时回滚，否则提交（需要原生*sql.Tx时使用，
+// 否则推荐RunInTransaction）
+func (p *PbMysqlDB) Transaction(fn func(tx *sql.Tx) error) error {
+	if p.tx != nil {
+		return errors.New("nested transaction is not supported")
+	}
+	tx, err := p.DB.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	if err := fn(tx); err != nil {
+		if rbErr := tx.Rollback(); rbErr != nil {
+			return fmt.Errorf("%w (rollback failed: %v)", err, rbErr)
+		}
+		return err
+	}
+	return tx.Commit()
+}
+
+// tableForMessage 解析行消息对应的已注册表
+func (p *PbMysqlDB) tableForMessage(message proto.Message) (*MessageTable, error) {
+	tableName := GetTableName(message)
+	table, ok := p.Tables[tableName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+	}
+	return table, nil
+}
+
+// resolveAnyTable 解析行消息或列表消息（包含单个repeated字段）对应的已注册表
+func resolveAnyTable(tables map[string]*MessageTable, message proto.Message) (*MessageTable, error) {
+	tableName := GetTableName(message)
+	if table, ok := tables[tableName]; ok {
+		return table, nil
+	}
+	if table, _, err := resolveListTable(tables, message); err == nil {
+		return table, nil
+	}
+	return nil, fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+}
+
+// normalizeWhereClause 空条件时返回恒真条件，兼容无条件查询
+func normalizeWhereClause(whereClause string) string {
+	if whereClause == "" {
+		return "1=1"
+	}
+	return whereClause
+}
+
+// resolveListTable 从包含单个repeated字段的列表消息中解析出已注册的表和该字段
+func resolveListTable(tables map[string]*MessageTable, list proto.Message) (*MessageTable, protoreflect.FieldDescriptor, error) {
+	listField, err := getSingleRepeatedField(list)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	tableName := string(listField.Message().FullName())
+	table, ok := tables[tableName]
+	if !ok {
+		return nil, nil, fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+	}
+	return table, listField, nil
+}
+
+// scanProtoRowsToList 把结果集逐行反序列化并追加到repeated字段（先清空旧数据）
+func scanProtoRowsToList(rows *sql.Rows, listValue protoreflect.List) error {
+	listValue.Truncate(0)
+
+	for rows.Next() {
+		row, err := scanRowStrings(rows)
+		if err != nil {
+			return err
+		}
+
+		element := listValue.NewElement()
+		if err := pbconv.ParseFromString(element.Message().Interface(), row); err != nil {
+			return err
+		}
+		listValue.Append(element)
+	}
+	return rows.Err()
 }
 
 func getSingleRepeatedField(list proto.Message) (protoreflect.FieldDescriptor, error) {
@@ -1294,208 +1562,14 @@ func getSingleRepeatedField(list proto.Message) (protoreflect.FieldDescriptor, e
 	return repeatedField, nil
 }
 
-func GetRepeatedFieldElementType(list proto.Message) (reflect.Type, error) {
-	elementField, err := getSingleRepeatedField(list)
-	if err != nil {
-		return nil, err
-	}
-
-	elementDesc := elementField.Message()
-
-	// 通过全局类型注册表查找消息类型（替换 proto.MessageType）
-	elemType, err := protoregistry.GlobalTypes.FindMessageByName(elementDesc.FullName())
-	if err != nil {
-		return nil, fmt.Errorf("failed to find message type %s: %w", elementDesc.FullName(), err)
-	}
-
-	// 创建实例并返回其反射类型（*T）
-	elemInstance := elemType.New().Interface()
-	return reflect.TypeOf(elemInstance), nil
-}
-
+// GetElementTableName 获取列表消息中repeated元素类型对应的表名
 func GetElementTableName(list proto.Message) (string, error) {
 	elementField, err := getSingleRepeatedField(list)
 	if err != nil {
 		return "", err
 	}
 
-	return string(elementField.Message().Name()), nil
-}
-
-// FindMultiByWhereWithArgs 执行带参数的批量查询（使用封装的表名获取函数）
-func (db *PbMysqlDB) FindMultiByWhereWithArgs(list proto.Message, whereClause string, args []interface{}) error {
-	// 1. 通过工具函数获取元素类型对应的表名
-	tableName, err := GetElementTableName(list)
-	if err != nil {
-		return fmt.Errorf("failed to get element table name: %w", err)
-	}
-
-	// 2. 验证表是否已注册
-	table, ok := db.Tables[tableName]
-	if !ok {
-		return fmt.Errorf("%w: %s (element type table)", ErrTableNotFound, tableName)
-	}
-
-	// 3. 构建查询字段（使用表定义的字段列表）
-	queryFields := table.fieldsListSQL
-
-	// 4. 构建完整SQL（严格使用占位符）
-	sql := fmt.Sprintf("SELECT %s FROM %s WHERE %s",
-		queryFields,
-		escapeMySQLName(tableName),
-		whereClause)
-
-	// 5. 执行参数化查询
-	rows, err := db.DB.Query(sql, args...)
-	if err != nil {
-		return fmt.Errorf("query failed: %v, SQL: %s", err, sql)
-	}
-	defer rows.Close()
-
-	// 6. 解析结果到list
-	return db.scanRowsToList(rows, list)
-}
-
-// FindMultiByKV 根据键值对批量查询（修复数字参数处理）
-func (db *PbMysqlDB) FindMultiByKV(list proto.Message, key string, value interface{}) error {
-	// 直接使用参数化查询，避免将value转为字符串拼接
-	return db.FindMultiByWhereWithArgs(list, fmt.Sprintf("%s = ?", escapeMySQLName(key)), []interface{}{value})
-}
-
-func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause string) error {
-	reflectionParent := message.ProtoReflect()
-	listField, err := getSingleRepeatedField(message)
-	if err != nil {
-		return err
-	}
-
-	// 获取表名（repeated字段的元素类型对应的表）
-	elementType := listField.Message()
-	tableName := string(elementType.Name())
-	table, ok := p.Tables[tableName]
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
-	}
-
-	// 内部自动拼接 WHERE 关键字（外部无需传入WHERE）
-	// 若条件为空，默认查询所有数据（WHERE 1=1 兼容无条件场景）
-	whereSQL := "WHERE 1=1"
-	if whereClause != "" {
-		whereSQL = "WHERE " + whereClause
-	}
-	sqlStmt := table.GetSelectSQL(false) + " " + whereSQL + ";"
-
-	// 执行查询
-	rows, err := p.DB.Query(sqlStmt)
-	if err != nil {
-		return fmt.Errorf("exec multi select (clause) for table %s: %w, SQL: %s", tableName, err, sqlStmt)
-	}
-	defer rows.Close()
-
-	// 处理结果集（省略重复代码，与之前一致）
-	columns, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("get columns for table %s: %w", tableName, err)
-	}
-
-	columnValues := make([][]byte, len(columns))
-	scans := make([]interface{}, len(columns))
-	for k := range columnValues {
-		scans[k] = &columnValues[k]
-	}
-
-	listValue := reflectionParent.Mutable(listField).List()
-	listValue.Truncate(0)
-
-	for rows.Next() {
-		if err := rows.Scan(scans...); err != nil {
-			return fmt.Errorf("scan row for table %s: %w", tableName, err)
-		}
-
-		resultRow := make([]string, len(columns))
-		for i, v := range columnValues {
-			resultRow[i] = string(v)
-		}
-
-		listElement := listValue.NewElement()
-		elementMsg := listElement.Message().Interface()
-		if err := pbconv.ParseFromString(elementMsg, resultRow); err != nil {
-			return fmt.Errorf("parse row for table %s: %w", tableName, err)
-		}
-		listValue.Append(listElement)
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error for table %s: %w", tableName, err)
-	}
-
-	return nil
-}
-
-// 注意：whereClause 是纯条件字符串（如 "id > 100"，无需包含WHERE）
-func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause string) error {
-	reflectionParent := message.ProtoReflect()
-	listField, err := getSingleRepeatedField(message)
-	if err != nil {
-		return err
-	}
-
-	tableName := string(listField.Message().Name())
-	table, ok := p.Tables[tableName]
-	if !ok {
-		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
-	}
-
-	// 内部自动拼接 WHERE 关键字（外部无需传入WHERE）
-	whereSQL := "WHERE 1=1"
-	if whereClause != "" {
-		whereSQL = "WHERE " + whereClause
-	}
-	sqlStmt := table.GetSelectSQL(false) + " " + whereSQL + ";"
-
-	rows, err := p.DB.Query(sqlStmt)
-	if err != nil {
-		return fmt.Errorf("exec select all for table %s: %w, SQL: %s", tableName, err, sqlStmt)
-	}
-	defer rows.Close()
-
-	// 处理结果集（省略重复代码，与之前一致）
-	columns, err := rows.Columns()
-	if err != nil {
-		return fmt.Errorf("get columns for table %s: %w", tableName, err)
-	}
-
-	columnValues := make([][]byte, len(columns))
-	scans := make([]interface{}, len(columns))
-	for k := range columnValues {
-		scans[k] = &columnValues[k]
-	}
-
-	listValue := reflectionParent.Mutable(listField).List()
-	listValue.Truncate(0)
-
-	for rows.Next() {
-		if err := rows.Scan(scans...); err != nil {
-			return fmt.Errorf("scan row for table %s: %w", tableName, err)
-		}
-
-		result := make([]string, len(columns))
-		for i, v := range columnValues {
-			result[i] = string(v)
-		}
-
-		listElement := listValue.NewElement()
-		if err := pbconv.ParseFromString(listElement.Message().Interface(), result); err != nil {
-			return fmt.Errorf("parse row for table %s: %w", tableName, err)
-		}
-		listValue.Append(listElement)
-	}
-
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("rows error for table %s: %w", tableName, err)
-	}
-
-	return nil
+	return string(elementField.Message().FullName()), nil
 }
 
 // MultiQuery 单张表的查询参数
@@ -1505,14 +1579,14 @@ type MultiQuery struct {
 	WhereArgs   []interface{} // 条件中的参数（与?对应）
 }
 
-// FindMultiByWhereClauses 一次查询多张无关表，返回多个结果
+// FindMultiByWhereClauses 一次查询多张无关表，每张表返回一条结果（依赖MultiStatements）
 func (p *PbMysqlDB) FindMultiByWhereClauses(queries []MultiQuery) error {
 	if len(queries) == 0 {
 		return errors.New("no queries provided")
 	}
 
-	// 1. 收集每张表的查询SQL（不含分号）
-	var sqlParts []string
+	// 收集每张表的查询SQL（分号分隔）与参数
+	sqlParts := make([]string, 0, len(queries))
 	var allArgs []interface{}
 	for _, q := range queries {
 		tableName := GetTableName(q.Message)
@@ -1520,98 +1594,46 @@ func (p *PbMysqlDB) FindMultiByWhereClauses(queries []MultiQuery) error {
 		if !ok {
 			return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 		}
-
-		// 生成单表查询SQL（包含WHERE子句，不含分号）
-		selectSQL := table.GetSelectSQL(false) + " WHERE " + q.WhereClause
-		sqlParts = append(sqlParts, selectSQL)
-
-		// 收集当前查询的参数
+		sqlParts = append(sqlParts, table.GetSelectSQL(false)+" WHERE "+q.WhereClause)
 		allArgs = append(allArgs, q.WhereArgs...)
 	}
 
-	// 2. 用分号分隔多条SQL，最后不加多余分号（修复语法错误）
 	sqlStmt := strings.Join(sqlParts, "; ")
-
-	// 3. 执行批量查询
 	rows, err := p.DB.Query(sqlStmt, allArgs...)
 	if err != nil {
 		return fmt.Errorf("exec multi select: %w, SQL: %s, args: %v", err, sqlStmt, allArgs)
 	}
 	defer rows.Close()
 
-	// 4. 依次处理每个结果集（与queries顺序一致）
+	// 依次处理每个结果集（与queries顺序一致）
 	for idx, q := range queries {
-		tableName := GetTableName(q.Message)
-		// 处理当前表的结果集
-		columns, err := rows.Columns()
-		if err != nil {
-			return fmt.Errorf("get columns for table %s: %w", tableName, err)
+		if err := scanOneProtoRow(rows, q.Message); err != nil {
+			return fmt.Errorf("%w: %s", err, GetTableName(q.Message))
 		}
-
-		columnValues := make([][]byte, len(columns))
-		scans := make([]interface{}, len(columns))
-		for k := range columnValues {
-			scans[k] = &columnValues[k]
-		}
-
-		found := false
-		for rows.Next() {
-			if found {
-				return fmt.Errorf("%w: %s", ErrMultipleRowsFound, tableName)
-			}
-			if err := rows.Scan(scans...); err != nil {
-				return fmt.Errorf("scan row for table %s: %w", tableName, err)
-			}
-
-			// 转换查询结果为字符串数组
-			result := make([]string, len(columns))
-			for i, v := range columnValues {
-				result[i] = string(v)
-			}
-
-			// 映射到消息体
-			if err := pbconv.ParseFromString(q.Message, result); err != nil {
-				return fmt.Errorf("parse row for table %s: %w", tableName, err)
-			}
-			found = true
-		}
-
-		// 检查当前结果集的错误
-		if err := rows.Err(); err != nil {
-			return fmt.Errorf("rows error for table %s: %w", tableName, err)
-		}
-		if !found {
-			return fmt.Errorf("%w: %s", ErrNoRowsFound, tableName)
-		}
-
-		// 切换到下一个结果集（最后一个不需要切换）
-		if idx < len(queries)-1 {
-			if !rows.NextResultSet() {
-				return fmt.Errorf("missing result set for table %s", GetTableName(queries[idx+1].Message))
-			}
+		if idx < len(queries)-1 && !rows.NextResultSet() {
+			return fmt.Errorf("missing result set for table %s", GetTableName(queries[idx+1].Message))
 		}
 	}
-
 	return nil
+}
+
+// newMessageTable 构建消息-表映射并预生成SQL片段
+func newMessageTable(m proto.Message, opts ...TableOption) *MessageTable {
+	table := &MessageTable{
+		tableName:  GetTableName(m),
+		Descriptor: GetDescriptor(m),
+	}
+	for _, opt := range opts {
+		opt(table)
+	}
+	table.Init()
+	return table
 }
 
 // RegisterTable 注册Protobuf与表的映射关系
 func (p *PbMysqlDB) RegisterTable(m proto.Message, opts ...TableOption) {
-	tableName := GetTableName(m)
-	table := &MessageTable{
-		tableName:       tableName,
-		defaultInstance: m,
-		Descriptor:      GetDescriptor(m),
-		options:         GetDescriptor(m).Options().ProtoReflect(),
-		fields:          make(map[int]string),
-	}
-
-	for _, opt := range opts {
-		opt(table)
-	}
-
-	p.Tables[tableName] = table
-	table.Init()
+	table := newMessageTable(m, opts...)
+	p.Tables[table.tableName] = table
 }
 
 // TableOption 表选项函数

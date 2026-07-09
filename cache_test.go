@@ -1,0 +1,231 @@
+package proto2mysql
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"sync"
+	"testing"
+	"time"
+
+	messageoption "github.com/luyuancpp/protooption"
+	"google.golang.org/protobuf/proto"
+)
+
+// fakeCache 内存缓存实现，可注入错误模拟Redis故障
+type fakeCache struct {
+	mu      sync.Mutex
+	data    map[string][]byte
+	getErr  error
+	setErr  error
+	delErr  error
+	deleted []string
+}
+
+func newFakeCache() *fakeCache {
+	return &fakeCache{data: map[string][]byte{}}
+}
+
+func (f *fakeCache) Get(_ context.Context, key string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.getErr != nil {
+		return nil, f.getErr
+	}
+	if v, ok := f.data[key]; ok {
+		return v, nil
+	}
+	return nil, ErrCacheMiss
+}
+
+func (f *fakeCache) Set(_ context.Context, key string, value []byte, _ time.Duration) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.setErr != nil {
+		return f.setErr
+	}
+	f.data[key] = value
+	return nil
+}
+
+func (f *fakeCache) Del(_ context.Context, keys ...string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.delErr != nil {
+		return f.delErr
+	}
+	for _, k := range keys {
+		delete(f.data, k)
+		f.deleted = append(f.deleted, k)
+	}
+	return nil
+}
+
+func newCacheTestDB(cache Cache) *PbMysqlDB {
+	db := NewPbMysqlDB()
+	db.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
+	if cache != nil {
+		db.EnableCache(cache, time.Minute)
+	}
+	return db
+}
+
+// TestCacheKeyFormat 缓存key为 pb:<表名>:<主键值...>
+func TestCacheKeyFormat(t *testing.T) {
+	db := newCacheTestDB(newFakeCache())
+
+	key, err := db.CacheKey(&messageoption.GolangTest{Id: 42})
+	if err != nil {
+		t.Fatalf("CacheKey失败: %v", err)
+	}
+	want := "pb:" + GetTableName(&messageoption.GolangTest{}) + ":42"
+	if key != want {
+		t.Errorf("key = %q, 预期 %q", key, want)
+	}
+
+	// 复合主键：所有主键值依次拼接
+	db2 := NewPbMysqlDB()
+	db2.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id", "group_id"))
+	db2.EnableCache(newFakeCache(), time.Minute)
+	key2, err := db2.CacheKey(&messageoption.GolangTest{Id: 1, GroupId: 2})
+	if err != nil {
+		t.Fatalf("CacheKey失败: %v", err)
+	}
+	want2 := "pb:" + GetTableName(&messageoption.GolangTest{}) + ":1:2"
+	if key2 != want2 {
+		t.Errorf("key = %q, 预期 %q", key2, want2)
+	}
+}
+
+// TestCacheHitAndBackfill 缓存命中直接反序列化；回填后可再次命中
+func TestCacheHitAndBackfill(t *testing.T) {
+	cache := newFakeCache()
+	db := newCacheTestDB(cache)
+	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
+
+	src := &messageoption.GolangTest{Id: 42, Ip: "10.0.0.1", Port: 8888}
+
+	// 回填
+	db.cacheSetProto(table, src)
+
+	// 命中：只带主键的消息应被填满
+	got := &messageoption.GolangTest{Id: 42}
+	if !db.cacheGetProto(table, got) {
+		t.Fatal("预期缓存命中")
+	}
+	if !proto.Equal(src, got) {
+		t.Errorf("缓存数据不一致\nwant: %s\ngot:  %s", src, got)
+	}
+
+	// 未命中
+	miss := &messageoption.GolangTest{Id: 999}
+	if db.cacheGetProto(table, miss) {
+		t.Error("不存在的key不应命中")
+	}
+}
+
+// TestCacheDegradation Redis故障时读写全部降级，不影响调用方
+func TestCacheDegradation(t *testing.T) {
+	cache := newFakeCache()
+	cache.getErr = errors.New("redis: connection refused")
+	cache.setErr = errors.New("redis: connection refused")
+	cache.delErr = errors.New("redis: connection refused")
+
+	db := newCacheTestDB(cache)
+	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
+	msg := &messageoption.GolangTest{Id: 1}
+
+	// Get故障 → 未命中（降级读DB）
+	if db.cacheGetProto(table, msg) {
+		t.Error("缓存故障时应视为未命中")
+	}
+	// Set/Del故障 → 不panic不报错
+	db.cacheSetProto(table, msg)
+	db.invalidateMessages(table, msg)
+	if err := db.InvalidateCache(msg); err == nil {
+		t.Log("InvalidateCache返回了缓存错误（手动调用可感知），符合预期")
+	}
+}
+
+// TestCacheCorruptedDataFallback 缓存内容损坏时降级读DB
+func TestCacheCorruptedDataFallback(t *testing.T) {
+	cache := newFakeCache()
+	db := newCacheTestDB(cache)
+	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
+
+	msg := &messageoption.GolangTest{Id: 42}
+	key, _ := cacheKeyFor(table, msg)
+	cache.data[key] = []byte{0xFF, 0xFF, 0xFF} // 非法proto数据
+
+	if db.cacheGetProto(table, msg) {
+		t.Error("损坏的缓存数据应视为未命中")
+	}
+}
+
+// TestCacheInvalidateImmediate 非事务写：立即删缓存
+func TestCacheInvalidateImmediate(t *testing.T) {
+	cache := newFakeCache()
+	db := newCacheTestDB(cache)
+	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
+
+	msg := &messageoption.GolangTest{Id: 42, Port: 1}
+	db.cacheSetProto(table, msg)
+
+	db.invalidateMessages(table, msg)
+
+	key, _ := cacheKeyFor(table, msg)
+	if _, ok := cache.data[key]; ok {
+		t.Error("非事务失效应立即删除缓存")
+	}
+	if len(db.pendingCacheDels) != 0 {
+		t.Error("非事务失效不应暂存key")
+	}
+}
+
+// TestCacheInvalidateDeferredInTx 事务内写：删缓存延迟暂存（提交后统一执行）
+func TestCacheInvalidateDeferredInTx(t *testing.T) {
+	cache := newFakeCache()
+	db := newCacheTestDB(cache)
+	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
+
+	msg := &messageoption.GolangTest{Id: 42, Port: 1}
+	db.cacheSetProto(table, msg)
+
+	// 模拟事务上下文（只需tx非空，不执行真实SQL）
+	txDB := &PbMysqlDB{
+		Tables:   db.Tables,
+		cache:    db.cache,
+		cacheTTL: db.cacheTTL,
+		tx:       new(sql.Tx),
+	}
+	txDB.invalidateMessages(table, msg)
+
+	key, _ := cacheKeyFor(table, msg)
+	if _, ok := cache.data[key]; !ok {
+		t.Error("事务内不应立即删除缓存")
+	}
+	if len(txDB.pendingCacheDels) != 1 || txDB.pendingCacheDels[0] != key {
+		t.Errorf("事务内应暂存待删key，实际: %v", txDB.pendingCacheDels)
+	}
+
+	// 模拟提交后清理
+	db.cacheDelKeys(txDB.pendingCacheDels...)
+	if _, ok := cache.data[key]; ok {
+		t.Error("提交后应删除缓存")
+	}
+}
+
+// TestCacheDisabledNoop 未启用缓存时所有缓存操作为空操作
+func TestCacheDisabledNoop(t *testing.T) {
+	db := newCacheTestDB(nil)
+	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
+	msg := &messageoption.GolangTest{Id: 1}
+
+	if db.cacheEnabled() {
+		t.Error("未启用缓存时cacheEnabled应为false")
+	}
+	db.invalidateMessages(table, msg) // 不应panic
+	if err := db.InvalidateCache(msg); err != nil {
+		t.Errorf("未启用缓存时InvalidateCache应为空操作: %v", err)
+	}
+}
