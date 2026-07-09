@@ -127,8 +127,8 @@ func (m *MessageTable) getMySQLFieldType(fieldDesc protoreflect.FieldDescriptor)
 	return baseType
 }
 
-// PbMysqlDB 管理所有表的数据库实例
-type PbMysqlDB struct {
+// DB 管理所有表的数据库实例
+type DB struct {
 	Tables map[string]*MessageTable
 	DB     *sql.DB
 	DBName string
@@ -173,7 +173,7 @@ func (e sqlExecutor) QueryRow(query string, args ...interface{}) *sql.Row {
 }
 
 // conn 返回当前执行器：事务内返回tx，否则返回DB（均绑定当前context）
-func (p *PbMysqlDB) conn() sqlExecutor {
+func (p *DB) conn() sqlExecutor {
 	if p.tx != nil {
 		return sqlExecutor{ctx: p.context(), db: p.tx}
 	}
@@ -181,7 +181,7 @@ func (p *PbMysqlDB) conn() sqlExecutor {
 }
 
 // context 返回当前绑定的context，未绑定时返回Background
-func (p *PbMysqlDB) context() context.Context {
+func (p *DB) context() context.Context {
 	if p.ctx != nil {
 		return p.ctx
 	}
@@ -194,8 +194,8 @@ func (p *PbMysqlDB) context() context.Context {
 //
 // 注意：请在根实例上调用；RunInTransaction内请直接使用回调收到的tx实例
 // （事务实例的延迟缓存失效记录不会跨实例传递）。
-func (p *PbMysqlDB) WithContext(ctx context.Context) *PbMysqlDB {
-	return &PbMysqlDB{
+func (p *DB) WithContext(ctx context.Context) *DB {
+	return &DB{
 		Tables:           p.Tables,
 		DB:               p.DB,
 		DBName:           p.DBName,
@@ -219,10 +219,10 @@ func wrapExecErr(err error) error {
 // RunInTransaction 在事务中执行fn：fn收到的tx可直接使用全部增删改查接口，
 // fn返回错误时自动回滚，否则提交。适合“扣货币+发道具”等需要原子性的游戏逻辑。
 // 若启用了缓存，事务内的缓存失效会延迟到提交成功后执行（回滚不删缓存）。
-func (p *PbMysqlDB) RunInTransaction(fn func(tx *PbMysqlDB) error) error {
-	var txDB *PbMysqlDB
+func (p *DB) RunInTransaction(fn func(tx *DB) error) error {
+	var txDB *DB
 	err := p.Transaction(func(sqlTx *sql.Tx) error {
-		txDB = &PbMysqlDB{
+		txDB = &DB{
 			Tables:           p.Tables,
 			DB:               p.DB,
 			DBName:           p.DBName,
@@ -242,7 +242,7 @@ func (p *PbMysqlDB) RunInTransaction(fn func(tx *PbMysqlDB) error) error {
 }
 
 // OpenDB 打开数据库连接并切换数据库
-func (p *PbMysqlDB) OpenDB(db *sql.DB, dbname string) error {
+func (p *DB) OpenDB(db *sql.DB, dbname string) error {
 	p.DB = db
 	p.DBName = dbname
 	_, err := p.DB.ExecContext(p.context(), "USE "+escapeMySQLName(p.DBName))
@@ -430,7 +430,7 @@ func escapeMySQLComment(comment string) string {
 }
 
 // getTableColumns 获取表当前字段结构信息
-func (p *PbMysqlDB) getTableColumns(tableName string) (map[string]string, error) {
+func (p *DB) getTableColumns(tableName string) (map[string]string, error) {
 	table, ok := p.Tables[tableName]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
@@ -474,7 +474,7 @@ func (p *PbMysqlDB) getTableColumns(tableName string) (map[string]string, error)
 }
 
 // clearColumnCache 清除表字段缓存
-func (p *PbMysqlDB) clearColumnCache(tableName string) {
+func (p *DB) clearColumnCache(tableName string) {
 	if table, ok := p.Tables[tableName]; ok {
 		table.columnsMu.Lock()
 		table.cachedColumns = nil
@@ -483,7 +483,7 @@ func (p *PbMysqlDB) clearColumnCache(tableName string) {
 }
 
 // CreateOrUpdateTable 创建表或同步已有表字段结构。
-func (p *PbMysqlDB) CreateOrUpdateTable(m proto.Message) error {
+func (p *DB) CreateOrUpdateTable(m proto.Message) error {
 	tableName := GetTableName(m)
 	if _, ok := p.Tables[tableName]; !ok {
 		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
@@ -492,7 +492,7 @@ func (p *PbMysqlDB) CreateOrUpdateTable(m proto.Message) error {
 }
 
 // UpdateTableField 同步表字段（表不存在则创建，存在则对齐字段类型）
-func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
+func (p *DB) UpdateTableField(m proto.Message) error {
 	tableName := GetTableName(m)
 	table, ok := p.Tables[tableName]
 	if !ok {
@@ -559,7 +559,7 @@ func (p *PbMysqlDB) UpdateTableField(m proto.Message) error {
 }
 
 // IsTableExists 检查表是否存在
-func (p *PbMysqlDB) IsTableExists(tableName string) (bool, error) {
+func (p *DB) IsTableExists(tableName string) (bool, error) {
 	p.tableExistsMu.RLock()
 	if exists, ok := p.tableExistsCache[tableName]; ok {
 		p.tableExistsMu.RUnlock()
@@ -587,7 +587,7 @@ func (p *PbMysqlDB) IsTableExists(tableName string) (bool, error) {
 }
 
 // updateTableExistsCache 更新表存在缓存
-func (p *PbMysqlDB) updateTableExistsCache(tableName string, exists bool) {
+func (p *DB) updateTableExistsCache(tableName string, exists bool) {
 	p.tableExistsMu.Lock()
 	p.tableExistsCache[tableName] = exists
 	p.tableExistsMu.Unlock()
@@ -722,7 +722,7 @@ func (m *MessageTable) GetInsertOnDupKeyForPrimaryKeyWithArgs(message proto.Mess
 }
 
 // Insert 执行参数化的INSERT操作（直接用DB，无Tx）
-func (p *PbMysqlDB) Insert(message proto.Message) error {
+func (p *DB) Insert(message proto.Message) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
 	if !ok {
@@ -743,7 +743,7 @@ func (p *PbMysqlDB) Insert(message proto.Message) error {
 }
 
 // BatchInsert 执行批量INSERT操作（直接用DB，无Tx）
-func (p *PbMysqlDB) BatchInsert(messages []proto.Message) error {
+func (p *DB) BatchInsert(messages []proto.Message) error {
 	if len(messages) == 0 {
 		return errors.New("no messages to insert")
 	}
@@ -779,7 +779,7 @@ func (p *PbMysqlDB) BatchInsert(messages []proto.Message) error {
 
 // InsertIgnore 幂等插入（INSERT IGNORE）：主键/唯一键冲突时跳过不报错，
 // 补数据/防重复发奖常用。返回是否实际插入了新行。
-func (p *PbMysqlDB) InsertIgnore(message proto.Message) (bool, error) {
+func (p *DB) InsertIgnore(message proto.Message) (bool, error) {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return false, err
@@ -803,7 +803,7 @@ func (p *PbMysqlDB) InsertIgnore(message proto.Message) (bool, error) {
 }
 
 // InsertReturningID 插入并返回自增主键ID（LAST_INSERT_ID），自增主键表建议用此接口
-func (p *PbMysqlDB) InsertReturningID(message proto.Message) (int64, error) {
+func (p *DB) InsertReturningID(message proto.Message) (int64, error) {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return 0, err
@@ -822,7 +822,7 @@ func (p *PbMysqlDB) InsertReturningID(message proto.Message) (int64, error) {
 }
 
 // InsertOnDupUpdate 执行参数化的INSERT...ON DUPLICATE KEY UPDATE操作（直接用DB，无Tx）
-func (p *PbMysqlDB) InsertOnDupUpdate(message proto.Message) error {
+func (p *DB) InsertOnDupUpdate(message proto.Message) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
 	if !ok {
@@ -885,7 +885,7 @@ func (m *MessageTable) GetDeleteSQLByWhereWithArgs(whereClause string, whereArgs
 }
 
 // Delete 执行参数化的按主键删除操作（直接用DB，无Tx）
-func (p *PbMysqlDB) Delete(message proto.Message) error {
+func (p *DB) Delete(message proto.Message) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
 	if !ok {
@@ -907,7 +907,7 @@ func (p *PbMysqlDB) Delete(message proto.Message) error {
 }
 
 // DeleteByWhereWithArgs 执行参数化的自定义WHERE删除操作
-func (p *PbMysqlDB) DeleteByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+func (p *DB) DeleteByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -921,12 +921,12 @@ func (p *PbMysqlDB) DeleteByWhereWithArgs(message proto.Message, whereClause str
 }
 
 // DeleteByKV 按单个字段等值条件删除
-func (p *PbMysqlDB) DeleteByKV(message proto.Message, key string, value interface{}) error {
+func (p *DB) DeleteByKV(message proto.Message, key string, value interface{}) error {
 	return p.DeleteByWhereWithArgs(message, escapeMySQLName(key)+" = ?", []interface{}{value})
 }
 
 // BatchDelete 按主键批量删除（DELETE ... WHERE pk IN (...)，自动分批）
-func (p *PbMysqlDB) BatchDelete(messages []proto.Message) error {
+func (p *DB) BatchDelete(messages []proto.Message) error {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -977,7 +977,7 @@ func (p *PbMysqlDB) BatchDelete(messages []proto.Message) error {
 }
 
 // Update 按主键更新消息中已设置的字段（UPDATE ... WHERE pk = ?）
-func (p *PbMysqlDB) Update(message proto.Message) error {
+func (p *DB) Update(message proto.Message) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -995,7 +995,7 @@ func (p *PbMysqlDB) Update(message proto.Message) error {
 }
 
 // UpdateByWhereWithArgs 按自定义WHERE条件更新消息中已设置的字段
-func (p *PbMysqlDB) UpdateByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+func (p *DB) UpdateByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -1013,7 +1013,7 @@ func (p *PbMysqlDB) UpdateByWhereWithArgs(message proto.Message, whereClause str
 
 // UpdateFieldsByPK 按主键只更新指定字段（部分更新），避免Update全字段覆盖
 // 冲掉其他地方的并发写入（如改名操作把别处刚加的金币覆盖回去）
-func (p *PbMysqlDB) UpdateFieldsByPK(message proto.Message, fields ...string) error {
+func (p *DB) UpdateFieldsByPK(message proto.Message, fields ...string) error {
 	if len(fields) == 0 {
 		return errors.New("no fields to update")
 	}
@@ -1052,7 +1052,7 @@ func (p *PbMysqlDB) UpdateFieldsByPK(message proto.Message, fields ...string) er
 }
 
 // UpdateKVByPK 按主键设置单个字段的值（如改状态、封号）
-func (p *PbMysqlDB) UpdateKVByPK(message proto.Message, field string, value interface{}) error {
+func (p *DB) UpdateKVByPK(message proto.Message, field string, value interface{}) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -1078,7 +1078,7 @@ func (p *PbMysqlDB) UpdateKVByPK(message proto.Message, field string, value inte
 // UpdateIfVersion 乐观锁CAS更新：按主键更新消息中已设置的字段（versionField自动+1），
 // 仅当数据库中versionField等于message当前值时生效。返回false表示版本冲突（被其他
 // 写入抢先），调用方应重读后重试。不想用行锁时的轻量并发控制。
-func (p *PbMysqlDB) UpdateIfVersion(message proto.Message, versionField string) (bool, error) {
+func (p *DB) UpdateIfVersion(message proto.Message, versionField string) (bool, error) {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return false, err
@@ -1152,7 +1152,7 @@ func (p *PbMysqlDB) UpdateIfVersion(message proto.Message, versionField string) 
 // 与UpdateIfVersion的区别：不用Has()自动挑字段，显式列出要写的列，
 // 规避proto3隐式presence下零值字段（空bytes/0/""）被跳过的坑。
 // 返回false=版本冲突，调用方重读重试。
-func (p *PbMysqlDB) UpdateFieldsIfVersion(message proto.Message, versionField string, fields ...string) (bool, error) {
+func (p *DB) UpdateFieldsIfVersion(message proto.Message, versionField string, fields ...string) (bool, error) {
 	if len(fields) == 0 {
 		return false, errors.New("no fields to update")
 	}
@@ -1317,9 +1317,9 @@ func (m *MessageTable) Init() {
 	}
 }
 
-// NewPbMysqlDB 创建新的数据库实例
-func NewPbMysqlDB() *PbMysqlDB {
-	return &PbMysqlDB{
+// NewDB 创建新的数据库实例
+func NewDB() *DB {
+	return &DB{
 		Tables:           make(map[string]*MessageTable),
 		tableExistsCache: make(map[string]bool),
 	}
@@ -1336,7 +1336,7 @@ func GetDescriptor(m proto.Message) protoreflect.MessageDescriptor {
 }
 
 // GetCreateTableSQL 获取创建表的SQL（对外接口）
-func (p *PbMysqlDB) GetCreateTableSQL(message proto.Message) string {
+func (p *DB) GetCreateTableSQL(message proto.Message) string {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
 	if !ok {
@@ -1346,7 +1346,7 @@ func (p *PbMysqlDB) GetCreateTableSQL(message proto.Message) string {
 }
 
 // Save 执行参数化的REPLACE操作（直接用DB，无Tx）
-func (p *PbMysqlDB) Save(message proto.Message) error {
+func (p *DB) Save(message proto.Message) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
 	if !ok {
@@ -1368,7 +1368,7 @@ func (p *PbMysqlDB) Save(message proto.Message) error {
 }
 
 // BatchSave 执行批量REPLACE操作（自动分批）
-func (p *PbMysqlDB) BatchSave(messages []proto.Message) error {
+func (p *DB) BatchSave(messages []proto.Message) error {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -1404,7 +1404,7 @@ func (p *PbMysqlDB) BatchSave(messages []proto.Message) error {
 
 // FindOneByPK 按消息中的主键值查询单条数据（查到后覆盖message其余字段）。
 // 启用缓存时为cache-aside读路径：先查缓存，未命中读DB后回填。
-func (p *PbMysqlDB) FindOneByPK(message proto.Message) error {
+func (p *DB) FindOneByPK(message proto.Message) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -1432,7 +1432,7 @@ func (p *PbMysqlDB) FindOneByPK(message proto.Message) error {
 
 // FindOneByPKForUpdate 按主键查询并加行锁（SELECT ... FOR UPDATE），
 // 仅在RunInTransaction内有意义，用于防止并发修改同一玩家数据
-func (p *PbMysqlDB) FindOneByPKForUpdate(message proto.Message) error {
+func (p *DB) FindOneByPKForUpdate(message proto.Message) error {
 	if p.tx == nil {
 		return errors.New("FindOneByPKForUpdate must be called inside RunInTransaction")
 	}
@@ -1462,7 +1462,7 @@ func (p *PbMysqlDB) FindOneByPKForUpdate(message proto.Message) error {
 
 // FindOrCreate 按主键查询，不存在则用message当前值插入（玩家首次登录常用）。
 // 返回created表示是否新建了记录。
-func (p *PbMysqlDB) FindOrCreate(message proto.Message) (created bool, err error) {
+func (p *DB) FindOrCreate(message proto.Message) (created bool, err error) {
 	err = p.FindOneByPK(message)
 	if err == nil {
 		return false, nil
@@ -1479,7 +1479,7 @@ func (p *PbMysqlDB) FindOrCreate(message proto.Message) (created bool, err error
 
 // FindAllByPKIn 按主键批量查询，返回列表（类似Redis MGET：给一批主键，返回命中的行，
 // 不存在的主键自动跳过）
-func (p *PbMysqlDB) FindAllByPKIn(list proto.Message, pkValues []interface{}) error {
+func (p *DB) FindAllByPKIn(list proto.Message, pkValues []interface{}) error {
 	table, listField, err := resolveListTable(p.Tables, list)
 	if err != nil {
 		return err
@@ -1500,7 +1500,7 @@ func (p *PbMysqlDB) FindAllByPKIn(list proto.Message, pkValues []interface{}) er
 
 // IncrByPK 按主键对数值字段原子加减（UPDATE ... SET f = f + delta），
 // 适合货币/经验等计数器，避免“读-改-写”竞态
-func (p *PbMysqlDB) IncrByPK(message proto.Message, field string, delta int64) error {
+func (p *DB) IncrByPK(message proto.Message, field string, delta int64) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -1526,7 +1526,7 @@ func (p *PbMysqlDB) IncrByPK(message proto.Message, field string, delta int64) e
 
 // DecrByPKIfEnough 按主键原子扣减数值字段，余额不足时不扣并返回false
 // （UPDATE ... SET f = f - ? WHERE pk = ? AND f >= ?，防止负数余额，扣钱/扣道具常用）
-func (p *PbMysqlDB) DecrByPKIfEnough(message proto.Message, field string, delta int64) (bool, error) {
+func (p *DB) DecrByPKIfEnough(message proto.Message, field string, delta int64) (bool, error) {
 	if delta < 0 {
 		return false, fmt.Errorf("delta must be non-negative, got %d", delta)
 	}
@@ -1565,12 +1565,12 @@ func (p *PbMysqlDB) DecrByPKIfEnough(message proto.Message, field string, delta 
 }
 
 // FindOneByKV 按单个字段等值条件查询单条数据
-func (p *PbMysqlDB) FindOneByKV(message proto.Message, whereKey string, whereVal string) error {
+func (p *DB) FindOneByKV(message proto.Message, whereKey string, whereVal string) error {
 	return p.FindOneByWhereWithArgs(message, escapeMySQLName(whereKey)+" = ?", []interface{}{whereVal})
 }
 
 // FindOneByWhereWithArgs 执行参数化的自定义WHERE查询（单条数据）
-func (p *PbMysqlDB) FindOneByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+func (p *DB) FindOneByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
 	if !ok {
@@ -1591,17 +1591,17 @@ func (p *PbMysqlDB) FindOneByWhereWithArgs(message proto.Message, whereClause st
 }
 
 // FindOneByWhereClause 按条件查询单条数据（whereClause为纯条件，无需带WHERE；空串查全表）
-func (p *PbMysqlDB) FindOneByWhereClause(message proto.Message, whereClause string) error {
+func (p *DB) FindOneByWhereClause(message proto.Message, whereClause string) error {
 	return p.FindOneByWhereWithArgs(message, normalizeWhereClause(whereClause), nil)
 }
 
 // FindAll 查询全表数据到列表消息（包含单个repeated字段的消息）
-func (p *PbMysqlDB) FindAll(message proto.Message) error {
+func (p *DB) FindAll(message proto.Message) error {
 	return p.FindAllByWhereWithArgs(message, "1=1", nil)
 }
 
 // FindAllByWhereWithArgs 执行参数化的自定义WHERE查询（批量数据）
-func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+func (p *DB) FindAllByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
 	table, listField, err := resolveListTable(p.Tables, message)
 	if err != nil {
 		return err
@@ -1622,22 +1622,22 @@ func (p *PbMysqlDB) FindAllByWhereWithArgs(message proto.Message, whereClause st
 }
 
 // FindAllByWhereClause 按条件查询批量数据（whereClause为纯条件，无需带WHERE；空串查全表）
-func (p *PbMysqlDB) FindAllByWhereClause(message proto.Message, whereClause string) error {
+func (p *DB) FindAllByWhereClause(message proto.Message, whereClause string) error {
 	return p.FindAllByWhereWithArgs(message, normalizeWhereClause(whereClause), nil)
 }
 
 // FindMultiByWhereWithArgs 与FindAllByWhereWithArgs等价，保留以兼容旧接口
-func (p *PbMysqlDB) FindMultiByWhereWithArgs(list proto.Message, whereClause string, args []interface{}) error {
+func (p *DB) FindMultiByWhereWithArgs(list proto.Message, whereClause string, args []interface{}) error {
 	return p.FindAllByWhereWithArgs(list, whereClause, args)
 }
 
 // FindMultiByKV 按单个字段等值条件查询批量数据
-func (p *PbMysqlDB) FindMultiByKV(list proto.Message, key string, value interface{}) error {
+func (p *DB) FindMultiByKV(list proto.Message, key string, value interface{}) error {
 	return p.FindAllByWhereWithArgs(list, escapeMySQLName(key)+" = ?", []interface{}{value})
 }
 
 // FindAllByKVIn 按单个字段的IN条件查询批量数据（WHERE key IN (...)）
-func (p *PbMysqlDB) FindAllByKVIn(list proto.Message, key string, values []interface{}) error {
+func (p *DB) FindAllByKVIn(list proto.Message, key string, values []interface{}) error {
 	if len(values) == 0 {
 		_, listField, err := resolveListTable(p.Tables, list)
 		if err != nil {
@@ -1652,7 +1652,7 @@ func (p *PbMysqlDB) FindAllByKVIn(list proto.Message, key string, values []inter
 }
 
 // FindMultiByWhereClause 与FindAllByWhereClause等价，保留以兼容旧接口
-func (p *PbMysqlDB) FindMultiByWhereClause(message proto.Message, whereClause string) error {
+func (p *DB) FindMultiByWhereClause(message proto.Message, whereClause string) error {
 	return p.FindAllByWhereClause(message, whereClause)
 }
 
@@ -1682,7 +1682,7 @@ func (o QueryOptions) sqlSuffix() string {
 }
 
 // FindAllWithOptions 按条件查询批量数据，支持ORDER BY / LIMIT / OFFSET
-func (p *PbMysqlDB) FindAllWithOptions(list proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
+func (p *DB) FindAllWithOptions(list proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
 	table, listField, err := resolveListTable(p.Tables, list)
 	if err != nil {
 		return err
@@ -1703,7 +1703,7 @@ func (p *PbMysqlDB) FindAllWithOptions(list proto.Message, whereClause string, w
 }
 
 // FindPage 分页查询批量数据（pageIndex从1开始）
-func (p *PbMysqlDB) FindPage(list proto.Message, whereClause string, whereArgs []interface{}, pageIndex, pageSize int) error {
+func (p *DB) FindPage(list proto.Message, whereClause string, whereArgs []interface{}, pageIndex, pageSize int) error {
 	if pageIndex < 1 || pageSize < 1 {
 		return fmt.Errorf("invalid page params: pageIndex=%d, pageSize=%d", pageIndex, pageSize)
 	}
@@ -1715,7 +1715,7 @@ func (p *PbMysqlDB) FindPage(list proto.Message, whereClause string, whereArgs [
 
 // FindOneWithOptions 按条件+排序取一条数据（如排行第一名、最新一条记录）。
 // 自动追加LIMIT 1，多行匹配时取排序后的第一条
-func (p *PbMysqlDB) FindOneWithOptions(message proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
+func (p *DB) FindOneWithOptions(message proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -1739,7 +1739,7 @@ func (p *PbMysqlDB) FindOneWithOptions(message proto.Message, whereClause string
 // FindPageByCursor 游标分页（keyset pagination）：按cursorField升序返回cursorVal之后的pageSize条，
 // 深分页时性能远好于OFFSET，适合流水/邮件列表。首页传cursorVal=nil，
 // 下一页传上一页最后一条的cursorField值。cursorField应有索引且唯一（如自增id）。
-func (p *PbMysqlDB) FindPageByCursor(list proto.Message, whereClause string, whereArgs []interface{}, cursorField string, cursorVal interface{}, pageSize int) error {
+func (p *DB) FindPageByCursor(list proto.Message, whereClause string, whereArgs []interface{}, cursorField string, cursorVal interface{}, pageSize int) error {
 	if pageSize < 1 {
 		return fmt.Errorf("invalid pageSize: %d", pageSize)
 	}
@@ -1765,12 +1765,12 @@ func (p *PbMysqlDB) FindPageByCursor(list proto.Message, whereClause string, whe
 }
 
 // Count 统计全表行数（message可为行消息或列表消息）
-func (p *PbMysqlDB) Count(message proto.Message) (int64, error) {
+func (p *DB) Count(message proto.Message) (int64, error) {
 	return p.CountByWhereWithArgs(message, "", nil)
 }
 
 // CountByWhereWithArgs 按条件统计行数（SELECT COUNT(*)），message可为行消息或列表消息
-func (p *PbMysqlDB) CountByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) (int64, error) {
+func (p *DB) CountByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) (int64, error) {
 	table, err := resolveAnyTable(p.Tables, message)
 	if err != nil {
 		return 0, err
@@ -1786,7 +1786,7 @@ func (p *PbMysqlDB) CountByWhereWithArgs(message proto.Message, whereClause stri
 }
 
 // Exists 判断是否存在满足条件的行（SELECT 1 ... LIMIT 1），message可为行消息或列表消息
-func (p *PbMysqlDB) Exists(message proto.Message, whereClause string, whereArgs []interface{}) (bool, error) {
+func (p *DB) Exists(message proto.Message, whereClause string, whereArgs []interface{}) (bool, error) {
 	table, err := resolveAnyTable(p.Tables, message)
 	if err != nil {
 		return false, err
@@ -1806,7 +1806,7 @@ func (p *PbMysqlDB) Exists(message proto.Message, whereClause string, whereArgs 
 }
 
 // ExistsByPK 按消息中的主键值判断行是否存在
-func (p *PbMysqlDB) ExistsByPK(message proto.Message) (bool, error) {
+func (p *DB) ExistsByPK(message proto.Message) (bool, error) {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return false, err
@@ -1820,7 +1820,7 @@ func (p *PbMysqlDB) ExistsByPK(message proto.Message) (bool, error) {
 
 // Transaction 在事务中执行fn：fn返回错误时回滚，否则提交（需要原生*sql.Tx时使用，
 // 否则推荐RunInTransaction）
-func (p *PbMysqlDB) Transaction(fn func(tx *sql.Tx) error) error {
+func (p *DB) Transaction(fn func(tx *sql.Tx) error) error {
 	if p.tx != nil {
 		return errors.New("nested transaction is not supported")
 	}
@@ -1838,7 +1838,7 @@ func (p *PbMysqlDB) Transaction(fn func(tx *sql.Tx) error) error {
 }
 
 // tableForMessage 解析行消息对应的已注册表
-func (p *PbMysqlDB) tableForMessage(message proto.Message) (*MessageTable, error) {
+func (p *DB) tableForMessage(message proto.Message) (*MessageTable, error) {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
 	if !ok {
@@ -1949,7 +1949,7 @@ type MultiQuery struct {
 }
 
 // FindMultiByWhereClauses 一次查询多张无关表，每张表返回一条结果（依赖MultiStatements）
-func (p *PbMysqlDB) FindMultiByWhereClauses(queries []MultiQuery) error {
+func (p *DB) FindMultiByWhereClauses(queries []MultiQuery) error {
 	if len(queries) == 0 {
 		return errors.New("no queries provided")
 	}
@@ -2002,7 +2002,7 @@ func newMessageTable(m proto.Message, opts ...TableOption) *MessageTable {
 // RegisterTable 注册Protobuf与表的映射关系。
 // 注册键固定为proto full name（查找路径统一按消息FullName解析）；
 // table.tableName仅决定生成SQL中的表名，可用WithTableName自定义。
-func (p *PbMysqlDB) RegisterTable(m proto.Message, opts ...TableOption) {
+func (p *DB) RegisterTable(m proto.Message, opts ...TableOption) {
 	table := newMessageTable(m, opts...)
 	p.Tables[GetTableName(m)] = table
 }
@@ -2053,7 +2053,7 @@ func WithNullableFields(fields ...string) TableOption {
 }
 
 // Close 关闭数据库连接
-func (p *PbMysqlDB) Close() error {
+func (p *DB) Close() error {
 	if p.DB == nil {
 		return nil
 	}

@@ -44,7 +44,7 @@ func GetMysqlConfig() *mysql.Config {
 	return NewMysqlConfig(jsonConfig)
 }
 
-func mustOpenTestDB(t *testing.T, pbMySqlDB *PbMysqlDB) *sql.DB {
+func mustOpenTestDB(t *testing.T, pdb *DB) *sql.DB {
 	t.Helper()
 
 	if testing.Short() {
@@ -70,7 +70,7 @@ func mustOpenTestDB(t *testing.T, pbMySqlDB *PbMysqlDB) *sql.DB {
 		t.Fatalf("数据库连接失败: %v", err)
 	}
 
-	if err := pbMySqlDB.OpenDB(db, mysqlConfig.DBName); err != nil {
+	if err := pdb.OpenDB(db, mysqlConfig.DBName); err != nil {
 		t.Fatalf("切换数据库失败: %v", err)
 	}
 
@@ -93,9 +93,9 @@ func testTableSQLName(m proto.Message) string {
 
 // recreateTestTable 删表重建：保证表schema与当前注册选项（主键/自增等）一致。
 // CREATE TABLE IF NOT EXISTS不会给已存在的表补主键，共享表的测试之间会互相污染
-func recreateTestTable(t *testing.T, db *sql.DB, pbMySqlDB *PbMysqlDB, m proto.Message) {
+func recreateTestTable(t *testing.T, db *sql.DB, pdb *DB, m proto.Message) {
 	t.Helper()
-	table, err := pbMySqlDB.tableForMessage(m)
+	table, err := pdb.tableForMessage(m)
 	if err != nil {
 		t.Fatalf("解析注册表失败: %v", err)
 	}
@@ -109,14 +109,14 @@ func recreateTestTable(t *testing.T, db *sql.DB, pbMySqlDB *PbMysqlDB, m proto.M
 
 // TestCreateTable 测试创建表
 func TestCreateTable(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable)
+	pdb.RegisterTable(testTable)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
-	createSQL := pbMySqlDB.GetCreateTableSQL(testTable)
+	createSQL := pdb.GetCreateTableSQL(testTable)
 	if createSQL == "" {
 		t.Fatal("生成创建表SQL失败")
 	}
@@ -128,19 +128,19 @@ func TestCreateTable(t *testing.T) {
 
 // TestAlterTable 测试修改表字段
 func TestAlterTable(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable)
+	pdb.RegisterTable(testTable)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 先确保表存在
-	if _, err := db.Exec(pbMySqlDB.GetCreateTableSQL(testTable)); err != nil {
+	if _, err := db.Exec(pdb.GetCreateTableSQL(testTable)); err != nil {
 		t.Fatalf("预处理表结构失败: %v", err)
 	}
 
-	if err := pbMySqlDB.UpdateTableField(testTable); err != nil {
+	if err := pdb.UpdateTableField(testTable); err != nil {
 		t.Fatalf("执行ALTER TABLE失败: %v", err)
 	}
 	t.Log("ALTER TABLE成功")
@@ -148,7 +148,7 @@ func TestAlterTable(t *testing.T) {
 
 // TestLoadSave 测试单条数据存/取
 func TestLoadSave(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	pbSave := &messageoption.GolangTest{
 		Id:      1,
 		GroupId: 1,
@@ -171,9 +171,9 @@ func TestLoadSave(t *testing.T) {
 			Name: "foo\\\\0bar,foo\\\\nbar,foo\\\\rbar,foo\\\\Zbar,foo\\\\\"bar,foo\\\\\\\\bar,foo\\\\'bar",
 		},
 	}
-	pbMySqlDB.RegisterTable(pbSave)
+	pdb.RegisterTable(pbSave)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 清理旧数据
@@ -182,16 +182,16 @@ func TestLoadSave(t *testing.T) {
 	}
 
 	// 保存数据
-	if err := pbMySqlDB.Save(pbSave); err != nil {
+	if err := pdb.Save(pbSave); err != nil {
 		t.Fatalf("保存pbSave失败: %v", err)
 	}
-	if err := pbMySqlDB.Save(pbSave1); err != nil {
+	if err := pdb.Save(pbSave1); err != nil {
 		t.Fatalf("保存pbSave1失败: %v", err)
 	}
 
 	// 验证数据
 	pbLoad := &messageoption.GolangTest{}
-	if err := pbMySqlDB.FindOneByKV(pbLoad, "id", "1"); err != nil {
+	if err := pdb.FindOneByKV(pbLoad, "id", "1"); err != nil {
 		t.Fatalf("读取id=1的数据失败: %v", err)
 	}
 	if !proto.Equal(pbSave, pbLoad) {
@@ -201,7 +201,7 @@ func TestLoadSave(t *testing.T) {
 	}
 
 	pbLoad1 := &messageoption.GolangTest{}
-	if err := pbMySqlDB.FindOneByKV(pbLoad1, "id", "2"); err != nil {
+	if err := pdb.FindOneByKV(pbLoad1, "id", "2"); err != nil {
 		t.Fatalf("读取id=2的数据失败: %v", err)
 	}
 	if !proto.Equal(pbSave1, pbLoad1) {
@@ -211,7 +211,7 @@ func TestLoadSave(t *testing.T) {
 
 // TestFindInsert 测试INSERT ON DUPLICATE KEY UPDATE
 func TestFindInsert(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	pbSave := &messageoption.GolangTest{
 		Id:      1,
 		GroupId: 1,
@@ -234,9 +234,9 @@ func TestFindInsert(t *testing.T) {
 			Name: "foo\\\\0bar,foo\\\\nbar,foo\\\\rbar,foo\\\\Zbar,foo\\\\\"bar,foo\\\\\\\\bar,foo\\\\'bar",
 		},
 	}
-	pbMySqlDB.RegisterTable(pbSave)
+	pdb.RegisterTable(pbSave)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 清理旧数据
@@ -245,16 +245,16 @@ func TestFindInsert(t *testing.T) {
 	}
 
 	// 执行插入更新
-	if err := pbMySqlDB.InsertOnDupUpdate(pbSave); err != nil {
+	if err := pdb.InsertOnDupUpdate(pbSave); err != nil {
 		t.Fatalf("执行InsertOnDupUpdate(pbSave)失败: %v", err)
 	}
-	if err := pbMySqlDB.InsertOnDupUpdate(pbSave1); err != nil {
+	if err := pdb.InsertOnDupUpdate(pbSave1); err != nil {
 		t.Fatalf("执行InsertOnDupUpdate(pbSave1)失败: %v", err)
 	}
 
 	// 验证数据
 	pbLoad := &messageoption.GolangTest{}
-	if err := pbMySqlDB.FindOneByKV(pbLoad, "id", "1"); err != nil {
+	if err := pdb.FindOneByKV(pbLoad, "id", "1"); err != nil {
 		t.Fatalf("读取id=1失败: %v", err)
 	}
 	if !proto.Equal(pbSave, pbLoad) {
@@ -264,7 +264,7 @@ func TestFindInsert(t *testing.T) {
 
 // TestLoadByWhereCase 测试按条件查询
 func TestLoadByWhereCase(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	pbSave := &messageoption.GolangTest{
 		Id:      1,
 		GroupId: 1,
@@ -276,9 +276,9 @@ func TestLoadByWhereCase(t *testing.T) {
 			Name: "foo\\\\0bar,foo\\\\nbar,foo\\\\rbar,foo\\\\Zbar,foo\\\\\"bar,foo\\\\\\\\bar,foo\\\\'bar",
 		},
 	}
-	pbMySqlDB.RegisterTable(pbSave)
+	pdb.RegisterTable(pbSave)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 清理旧数据
@@ -287,13 +287,13 @@ func TestLoadByWhereCase(t *testing.T) {
 	}
 
 	// 保存数据
-	if err := pbMySqlDB.Save(pbSave); err != nil {
+	if err := pdb.Save(pbSave); err != nil {
 		t.Fatalf("保存数据失败: %v", err)
 	}
 
 	// 按条件查询（WHERE子句无需加"where"前缀）
 	pbLoad := &messageoption.GolangTest{}
-	if err := pbMySqlDB.FindOneByWhereClause(pbLoad, "id=1"); err != nil {
+	if err := pdb.FindOneByWhereClause(pbLoad, "id=1"); err != nil {
 		t.Fatalf("执行FindOneByWhereClause失败: %v", err)
 	}
 	if !proto.Equal(pbSave, pbLoad) {
@@ -305,11 +305,11 @@ func TestLoadByWhereCase(t *testing.T) {
 
 // TestSpecialCharacterEscape 测试特殊字符存/取一致性
 func TestSpecialCharacterEscape(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable)
+	pdb.RegisterTable(testTable)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 测试用特殊字符集（修复：所有反斜杠用双反斜杠转义）
@@ -350,14 +350,14 @@ func TestSpecialCharacterEscape(t *testing.T) {
 		}
 
 		// 保存数据
-		if err := pbMySqlDB.Save(pbSave); err != nil {
+		if err := pdb.Save(pbSave); err != nil {
 			t.Errorf("保存[%s]数据失败: %v, 原始值: %q", sc.name, err, sc.value)
 			continue
 		}
 
 		// 读取数据
 		pbLoad := &messageoption.GolangTest{}
-		if err := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
+		if err := pdb.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
 			t.Errorf("读取[%s]数据失败: %v", sc.name, err)
 			continue
 		}
@@ -375,11 +375,11 @@ func TestSpecialCharacterEscape(t *testing.T) {
 
 // TestStringWithSpaces 测试空格处理
 func TestStringWithSpaces(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable)
+	pdb.RegisterTable(testTable)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 测试用例
@@ -413,14 +413,14 @@ func TestStringWithSpaces(t *testing.T) {
 				Name:     tc.name,
 			},
 		}
-		if err := pbMySqlDB.Save(pbSave); err != nil {
+		if err := pdb.Save(pbSave); err != nil {
 			t.Errorf("保存[%s]数据失败: %v", tc.desc, err)
 			continue
 		}
 
 		// 读取数据
 		pbLoad := &messageoption.GolangTest{}
-		if err := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatInt(int64(tc.id), 10)); err != nil {
+		if err := pdb.FindOneByKV(pbLoad, "id", strconv.FormatInt(int64(tc.id), 10)); err != nil {
 			t.Errorf("读取[%s]数据失败: %v", tc.desc, err)
 			continue
 		}
@@ -438,11 +438,11 @@ func TestStringWithSpaces(t *testing.T) {
 
 // TestLoadSaveListWhereCase 测试批量查询
 func TestLoadSaveListWhereCase(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable)
+	pdb.RegisterTable(testTable)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 构造预期数据
@@ -478,14 +478,14 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 
 	// 批量保存
 	for _, item := range expectedList.TestList {
-		if err := pbMySqlDB.Save(item); err != nil {
+		if err := pdb.Save(item); err != nil {
 			t.Fatalf("批量保存数据失败（id=%d）: %v", item.Id, err)
 		}
 	}
 
 	// 批量查询
 	actualList := &messageoption.GolangTestList{}
-	if err := pbMySqlDB.FindAllByWhereClause(actualList, "group_id=1"); err != nil {
+	if err := pdb.FindAllByWhereClause(actualList, "group_id=1"); err != nil {
 		t.Fatalf("批量查询失败: %v", err)
 	}
 
@@ -515,11 +515,11 @@ func TestLoadSaveListWhereCase(t *testing.T) {
 
 // TestSpecialCharacterEscape 测试特殊字符存/取一致性（新增12种场景，覆盖全类型）
 func TestSpecialCharacterEscape1(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable)
+	pdb.RegisterTable(testTable)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 新增：12种高频特殊字符场景 + 原有场景，共22种
@@ -583,7 +583,7 @@ func TestSpecialCharacterEscape1(t *testing.T) {
 		}
 
 		// 3. 保存数据（验证存储过程无错误）
-		if err := pbMySqlDB.Save(pbSave); err != nil {
+		if err := pdb.Save(pbSave); err != nil {
 			t.Errorf("保存[%s]失败: %v\n场景说明: %s\n原始值: %q",
 				sc.name, err, sc.desc, sc.value)
 			continue
@@ -591,7 +591,7 @@ func TestSpecialCharacterEscape1(t *testing.T) {
 
 		// 4. 读取数据（验证读取过程无错误）
 		pbLoad := &messageoption.GolangTest{}
-		findErr := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10))
+		findErr := pdb.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10))
 		if findErr != nil {
 			t.Errorf("读取[%s]失败: %v\n场景说明: %s\n原始值: %q",
 				sc.name, findErr, sc.desc, sc.value)
@@ -623,11 +623,11 @@ func TestSpecialCharacterEscape1(t *testing.T) {
 
 // TestFullRangeSpecialCharacters 覆盖ASCII全范围+Unicode扩展的所有特殊字符测试
 func TestFullRangeSpecialCharacters(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable)
+	pdb.RegisterTable(testTable)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// --------------- 1. ASCII控制字符（0-31 + 127，共33个）---------------
@@ -730,14 +730,14 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 		var ctrlByte = byte(ctrl.code)
 		pbSave.Player.Name = fmt.Sprintf("[%s]包含控制字符: %s (原始字节: \\x%02x)",
 			ctrl.name, escapedVal, ctrlByte)
-		if err := pbMySqlDB.Save(pbSave); err != nil {
+		if err := pdb.Save(pbSave); err != nil {
 			t.Errorf("保存[%s]失败: %v", ctrl.name, err)
 			continue
 		}
 
 		// 读取验证
 		pbLoad := &messageoption.GolangTest{}
-		if err := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
+		if err := pdb.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
 			t.Errorf("读取[%s]失败: %v", ctrl.name, err)
 			continue
 		}
@@ -774,14 +774,14 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 		}
 
 		// 保存数据
-		if err := pbMySqlDB.Save(pbSave); err != nil {
+		if err := pdb.Save(pbSave); err != nil {
 			t.Errorf("保存[%s(%c)]失败: %v", spec.name, spec.char, err)
 			continue
 		}
 
 		// 读取验证
 		pbLoad := &messageoption.GolangTest{}
-		if err := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
+		if err := pdb.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
 			t.Errorf("读取[%s(%c)]失败: %v", spec.name, spec.char, err)
 			continue
 		}
@@ -816,14 +816,14 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 		}
 
 		// 保存数据（验证UTF-8编码兼容性）
-		if err := pbMySqlDB.Save(pbSave); err != nil {
+		if err := pdb.Save(pbSave); err != nil {
 			t.Errorf("保存[%s]失败: %v\n字符: %q", unicode.name, err, unicode.value)
 			continue
 		}
 
 		// 读取验证
 		pbLoad := &messageoption.GolangTest{}
-		if err := pbMySqlDB.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
+		if err := pdb.FindOneByKV(pbLoad, "id", strconv.FormatUint(uint64(testID), 10)); err != nil {
 			t.Errorf("读取[%s]失败: %v\n字符: %q", unicode.name, err, unicode.value)
 			continue
 		}
@@ -848,7 +848,7 @@ func TestFullRangeSpecialCharacters(t *testing.T) {
 
 // TestNullValueHandling 测试空值和默认值处理
 func TestNullValueHandling(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	// 构造包含空值的测试数据
 	pbSave := &messageoption.GolangTest{
 		Id:      3,
@@ -857,22 +857,22 @@ func TestNullValueHandling(t *testing.T) {
 		Port:    0,
 		Player:  nil, // 空嵌套消息
 	}
-	pbMySqlDB.RegisterTable(pbSave)
+	pdb.RegisterTable(pbSave)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 清理旧数据
 	db.Exec("DELETE FROM " + testTableSQLName(pbSave) + " WHERE id=3")
 
 	// 保存空值数据
-	if err := pbMySqlDB.Save(pbSave); err != nil {
+	if err := pdb.Save(pbSave); err != nil {
 		t.Fatalf("保存空值数据失败: %v", err)
 	}
 
 	// 验证读取结果
 	pbLoad := &messageoption.GolangTest{}
-	if err := pbMySqlDB.FindOneByKV(pbLoad, "id", "3"); err != nil {
+	if err := pdb.FindOneByKV(pbLoad, "id", "3"); err != nil {
 		t.Fatalf("读取空值数据失败: %v", err)
 	}
 
@@ -890,7 +890,7 @@ func TestNullValueHandling(t *testing.T) {
 
 // TestLargeFieldStorage 测试大字段存储（超过256字符的字符串）
 func TestLargeFieldStorage(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	// 生成10KB的大字符串
 	largeStr := strings.Repeat("a", 1024*10)
 	pbSave := &messageoption.GolangTest{
@@ -903,22 +903,22 @@ func TestLargeFieldStorage(t *testing.T) {
 			Name:     largeStr, // 嵌套消息中的大字段
 		},
 	}
-	pbMySqlDB.RegisterTable(pbSave)
+	pdb.RegisterTable(pbSave)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 清理旧数据
 	db.Exec("DELETE FROM " + testTableSQLName(pbSave) + " WHERE id=4")
 
 	// 保存大字段数据
-	if err := pbMySqlDB.Save(pbSave); err != nil {
+	if err := pdb.Save(pbSave); err != nil {
 		t.Fatalf("保存大字段失败: %v", err)
 	}
 
 	// 验证读取结果
 	pbLoad := &messageoption.GolangTest{}
-	if err := pbMySqlDB.FindOneByKV(pbLoad, "id", "4"); err != nil {
+	if err := pdb.FindOneByKV(pbLoad, "id", "4"); err != nil {
 		t.Fatalf("读取大字段失败: %v", err)
 	}
 
@@ -933,11 +933,11 @@ func TestLargeFieldStorage(t *testing.T) {
 
 // TestBatchOperations 测试批量插入和查询
 func TestBatchOperations(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable)
+	pdb.RegisterTable(testTable)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 清理旧数据
@@ -952,14 +952,14 @@ func TestBatchOperations(t *testing.T) {
 			Ip:      fmt.Sprintf("192.168.1.%d", i),
 			Port:    3306 + uint32(i),
 		}
-		if err := pbMySqlDB.Save(pb); err != nil {
+		if err := pdb.Save(pb); err != nil {
 			t.Fatalf("批量插入失败（第%d条）: %v", i, err)
 		}
 	}
 
 	// 批量查询
 	list := &messageoption.GolangTestList{} // 假设存在包含repeated GolangTest的消息
-	if err := pbMySqlDB.FindAllByWhereWithArgs(
+	if err := pdb.FindAllByWhereWithArgs(
 		list,
 		"group_id = ?",
 		[]interface{}{3},
@@ -975,29 +975,29 @@ func TestBatchOperations(t *testing.T) {
 // TestUpdateFieldType 测试字段类型自动更新
 // TestUpdateFieldType 测试字段类型自动更新（修复版）
 func TestUpdateFieldType(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
 	tableName := GetTableName(testTable)
-	pbMySqlDB.RegisterTable(testTable)
+	pdb.RegisterTable(testTable)
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 确保测试表干净（先删除表）
 	_, _ = db.Exec(fmt.Sprintf("DROP TABLE IF EXISTS %s", escapeMySQLName(tableName)))
 	// 清除表存在缓存（关键：避免缓存影响判断）
-	pbMySqlDB.updateTableExistsCache(tableName, false)
+	pdb.updateTableExistsCache(tableName, false)
 	// 清除字段缓存
-	pbMySqlDB.clearColumnCache(tableName)
+	pdb.clearColumnCache(tableName)
 
 	// 1. 初始创建表（使用默认类型）
-	createSQL := pbMySqlDB.GetCreateTableSQL(testTable)
+	createSQL := pdb.GetCreateTableSQL(testTable)
 	if _, err := db.Exec(createSQL); err != nil {
 		t.Fatalf("创建表失败: %v, SQL: %s", err, createSQL)
 	}
 
 	// 2. 验证初始类型（例如StringKind默认是VARCHAR(255)）
-	initialCols, err := pbMySqlDB.getTableColumns(tableName)
+	initialCols, err := pdb.getTableColumns(tableName)
 	if err != nil {
 		t.Fatalf("初始查询表结构失败: %v", err)
 	}
@@ -1028,13 +1028,13 @@ func TestUpdateFieldType(t *testing.T) {
 	}()
 
 	// 执行更新字段操作
-	if err := pbMySqlDB.UpdateTableField(testTable); err != nil {
+	if err := pdb.UpdateTableField(testTable); err != nil {
 		t.Fatalf("更新字段类型失败: %v", err)
 	}
 
 	// 4. 验证类型是否更新（关键：先清除缓存再查询）
-	pbMySqlDB.clearColumnCache(tableName) // 清除字段缓存，避免读旧数据
-	updatedCols, err := pbMySqlDB.getTableColumns(tableName)
+	pdb.clearColumnCache(tableName) // 清除字段缓存，避免读旧数据
+	updatedCols, err := pdb.getTableColumns(tableName)
 	if err != nil {
 		t.Fatalf("更新后查询表结构失败: %v", err)
 	}
@@ -1047,8 +1047,8 @@ func TestUpdateFieldType(t *testing.T) {
 // TestFindMultiByWhereClauses 测试跨多张表的批量查询（golang_test1/2/3）
 func TestFindMultiByWhereClauses(t *testing.T) {
 	// 1. 初始化数据库连接
-	pbMySqlDB := NewPbMysqlDB()
-	db := mustOpenTestDB(t, pbMySqlDB)
+	pdb := NewDB()
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 2. 准备4张表的测试数据（原始表+3张新增表）
@@ -1104,22 +1104,22 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 	}
 
 	// 3. 注册表并创建表结构
-	pbMySqlDB.RegisterTable(testData)
-	pbMySqlDB.RegisterTable(testData1)
-	pbMySqlDB.RegisterTable(testData2)
-	pbMySqlDB.RegisterTable(testData3)
+	pdb.RegisterTable(testData)
+	pdb.RegisterTable(testData1)
+	pdb.RegisterTable(testData2)
+	pdb.RegisterTable(testData3)
 
 	// 创建/更新表结构
-	if err := pbMySqlDB.CreateOrUpdateTable(testData); err != nil {
+	if err := pdb.CreateOrUpdateTable(testData); err != nil {
 		t.Fatalf("创建golang_test表失败: %v", err)
 	}
-	if err := pbMySqlDB.CreateOrUpdateTable(testData1); err != nil {
+	if err := pdb.CreateOrUpdateTable(testData1); err != nil {
 		t.Fatalf("创建golang_test1表失败: %v", err)
 	}
-	if err := pbMySqlDB.CreateOrUpdateTable(testData2); err != nil {
+	if err := pdb.CreateOrUpdateTable(testData2); err != nil {
 		t.Fatalf("创建golang_test2表失败: %v", err)
 	}
-	if err := pbMySqlDB.CreateOrUpdateTable(testData3); err != nil {
+	if err := pdb.CreateOrUpdateTable(testData3); err != nil {
 		t.Fatalf("创建golang_test3表失败: %v", err)
 	}
 
@@ -1136,16 +1136,16 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 	clearTable(GetTableName(testData3), testData3.Id)
 
 	// 5. 插入测试数据
-	if err := pbMySqlDB.Save(testData); err != nil {
+	if err := pdb.Save(testData); err != nil {
 		t.Fatalf("保存golang_test数据失败: %v", err)
 	}
-	if err := pbMySqlDB.Save(testData1); err != nil {
+	if err := pdb.Save(testData1); err != nil {
 		t.Fatalf("保存golang_test1数据失败: %v", err)
 	}
-	if err := pbMySqlDB.Save(testData2); err != nil {
+	if err := pdb.Save(testData2); err != nil {
 		t.Fatalf("保存golang_test2数据失败: %v", err)
 	}
-	if err := pbMySqlDB.Save(testData3); err != nil {
+	if err := pdb.Save(testData3); err != nil {
 		t.Fatalf("保存golang_test3数据失败: %v", err)
 	}
 
@@ -1174,7 +1174,7 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 	}
 
 	// 7. 执行批量查询
-	if err := pbMySqlDB.FindMultiByWhereClauses(queries); err != nil {
+	if err := pdb.FindMultiByWhereClauses(queries); err != nil {
 		t.Fatalf("批量查询失败: %v", err)
 	}
 
@@ -1219,7 +1219,7 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 			WhereArgs:   []interface{}{9999}, // 不存在的ID
 		},
 	}
-	if err := pbMySqlDB.FindMultiByWhereClauses(invalidQueries); err == nil {
+	if err := pdb.FindMultiByWhereClauses(invalidQueries); err == nil {
 		t.Error("预期查询不存在的ID时返回错误，但未返回")
 	} else if !strings.Contains(err.Error(), ErrNoRowsFound.Error()) {
 		t.Errorf("预期错误包含[%s]，实际为: %v", ErrNoRowsFound, err)
@@ -1231,13 +1231,13 @@ func TestFindMultiByWhereClauses(t *testing.T) {
 // TestFindMultiInterfaces 测试多条结果查询的三个接口
 func TestFindMultiInterfaces(t *testing.T) {
 	// 1. 初始化数据库连接
-	pbMySqlDB := NewPbMysqlDB()
-	db := mustOpenTestDB(t, pbMySqlDB)
+	pdb := NewDB()
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 2. 注册测试表（golang_test）
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(
+	pdb.RegisterTable(
 		testTable,
 		WithPrimaryKey("id"),
 		WithAutoIncrementKey("id"),
@@ -1245,7 +1245,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 	)
 
 	// 3. 创建表并清理旧数据
-	if err := pbMySqlDB.CreateOrUpdateTable(testTable); err != nil {
+	if err := pdb.CreateOrUpdateTable(testTable); err != nil {
 		t.Fatalf("创建表失败: %v", err)
 	}
 	tableName := GetTableName(testTable)
@@ -1282,7 +1282,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 	}
 
 	// 批量插入测试数据
-	if err := pbMySqlDB.BatchInsert([]proto.Message{testData1, testData2, testData3, unrelatedData}); err != nil {
+	if err := pdb.BatchInsert([]proto.Message{testData1, testData2, testData3, unrelatedData}); err != nil {
 		t.Fatalf("插入测试数据失败: %v", err)
 	}
 
@@ -1292,7 +1292,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 	// 5. 测试 FindMultiByKV（键值对查询多条结果）
 	t.Run("FindMultiByKV", func(t *testing.T) {
 		var resultList messageoption.GolangTestList
-		err := pbMySqlDB.FindMultiByKV(&resultList, "player_id", uint64(1000))
+		err := pdb.FindMultiByKV(&resultList, "player_id", uint64(1000))
 		if err != nil {
 			t.Fatalf("FindMultiByKV查询失败: %v", err)
 		}
@@ -1317,7 +1317,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 	t.Run("FindMultiByWhereWithArgs", func(t *testing.T) {
 		var resultList messageoption.GolangTestList
 		// 复杂条件：player_id=1000 且 group_id=10
-		err := pbMySqlDB.FindMultiByWhereWithArgs(
+		err := pdb.FindMultiByWhereWithArgs(
 			&resultList,
 			"player_id = ? AND group_id = ?",
 			[]interface{}{uint64(1000), 10},
@@ -1346,7 +1346,7 @@ func TestFindMultiInterfaces(t *testing.T) {
 	t.Run("FindMultiByWhereClause", func(t *testing.T) {
 		var resultList messageoption.GolangTestList
 		// 固定条件（内部使用，无用户输入）
-		err := pbMySqlDB.FindMultiByWhereClause(
+		err := pdb.FindMultiByWhereClause(
 			&resultList,
 			"player_id = 1000 AND port > 3306", // port>3306：预期1002、1003
 		)
@@ -1406,13 +1406,13 @@ func TestMySQLIdentifierEscaping(t *testing.T) {
 		t.Fatalf("escapeMySQLName() = %q, 预期 %q", got, want)
 	}
 
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable, WithIndexes("player_id, group_id"), WithUniqueKey("ip"))
+	pdb.RegisterTable(testTable, WithIndexes("player_id, group_id"), WithUniqueKey("ip"))
 
 	// 表名取自proto FullName，所有标识符必须整体反引号转义
 	tableName := GetTableName(testTable)
-	createSQL := pbMySqlDB.GetCreateTableSQL(testTable)
+	createSQL := pdb.GetCreateTableSQL(testTable)
 	for _, want := range []string{
 		"CREATE TABLE IF NOT EXISTS `" + tableName + "`",
 		"INDEX `idx_" + tableName + "_0` (`player_id`,`group_id`)",
@@ -1455,14 +1455,14 @@ func TestBatchInsertRejectsMismatchedDescriptor(t *testing.T) {
 
 // TestCountExistsPageUpdate 集成测试：Count/Exists/FindAllWithOptions/FindPage/Update/UpdateByWhere/DeleteByWhere
 func TestCountExistsPageUpdate(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable, WithPrimaryKey("id"))
+	pdb.RegisterTable(testTable, WithPrimaryKey("id"))
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
-	recreateTestTable(t, db, pbMySqlDB, testTable)
+	recreateTestTable(t, db, pdb, testTable)
 
 	// 清理并写入5条测试数据（group_id=9）
 	if _, err := db.Exec("DELETE FROM " + testTableSQLName(testTable) + " WHERE group_id=9"); err != nil {
@@ -1475,14 +1475,14 @@ func TestCountExistsPageUpdate(t *testing.T) {
 			Ip:      "10.0.0." + strconv.Itoa(i),
 			Port:    uint32(4000 + i),
 		}
-		if err := pbMySqlDB.Save(item); err != nil {
+		if err := pdb.Save(item); err != nil {
 			t.Fatalf("写入测试数据失败（id=%d）: %v", item.Id, err)
 		}
 	}
 
 	// 1. Count / CountByWhereWithArgs
 	t.Run("Count", func(t *testing.T) {
-		count, err := pbMySqlDB.CountByWhereWithArgs(testTable, "group_id = ?", []interface{}{9})
+		count, err := pdb.CountByWhereWithArgs(testTable, "group_id = ?", []interface{}{9})
 		if err != nil {
 			t.Fatalf("Count失败: %v", err)
 		}
@@ -1491,7 +1491,7 @@ func TestCountExistsPageUpdate(t *testing.T) {
 		}
 
 		// 传列表消息也应能解析出表
-		countByList, err := pbMySqlDB.CountByWhereWithArgs(&messageoption.GolangTestList{}, "group_id = ?", []interface{}{9})
+		countByList, err := pdb.CountByWhereWithArgs(&messageoption.GolangTestList{}, "group_id = ?", []interface{}{9})
 		if err != nil {
 			t.Fatalf("按列表消息Count失败: %v", err)
 		}
@@ -1502,7 +1502,7 @@ func TestCountExistsPageUpdate(t *testing.T) {
 
 	// 2. Exists
 	t.Run("Exists", func(t *testing.T) {
-		exists, err := pbMySqlDB.Exists(testTable, "id = ?", []interface{}{9001})
+		exists, err := pdb.Exists(testTable, "id = ?", []interface{}{9001})
 		if err != nil {
 			t.Fatalf("Exists失败: %v", err)
 		}
@@ -1510,7 +1510,7 @@ func TestCountExistsPageUpdate(t *testing.T) {
 			t.Error("预期存在id=9001的行")
 		}
 
-		notExists, err := pbMySqlDB.Exists(testTable, "id = ?", []interface{}{999999})
+		notExists, err := pdb.Exists(testTable, "id = ?", []interface{}{999999})
 		if err != nil {
 			t.Fatalf("Exists失败: %v", err)
 		}
@@ -1522,7 +1522,7 @@ func TestCountExistsPageUpdate(t *testing.T) {
 	// 3. FindAllWithOptions（数量加载 + 排序）
 	t.Run("FindAllWithOptions", func(t *testing.T) {
 		var list messageoption.GolangTestList
-		err := pbMySqlDB.FindAllWithOptions(&list, "group_id = ?", []interface{}{9}, QueryOptions{
+		err := pdb.FindAllWithOptions(&list, "group_id = ?", []interface{}{9}, QueryOptions{
 			OrderBy: "id DESC",
 			Limit:   2,
 		})
@@ -1541,7 +1541,7 @@ func TestCountExistsPageUpdate(t *testing.T) {
 	// 4. FindPage（分页加载）
 	t.Run("FindPage", func(t *testing.T) {
 		var page2 messageoption.GolangTestList
-		err := pbMySqlDB.FindPage(&page2, "group_id = ?", []interface{}{9}, 2, 2)
+		err := pdb.FindPage(&page2, "group_id = ?", []interface{}{9}, 2, 2)
 		if err != nil {
 			t.Fatalf("FindPage失败: %v", err)
 		}
@@ -1549,7 +1549,7 @@ func TestCountExistsPageUpdate(t *testing.T) {
 			t.Fatalf("第2页预期2条，实际%d条", len(page2.TestList))
 		}
 
-		if err := pbMySqlDB.FindPage(&page2, "", nil, 0, 2); err == nil {
+		if err := pdb.FindPage(&page2, "", nil, 0, 2); err == nil {
 			t.Error("非法页码应返回错误")
 		}
 	})
@@ -1557,12 +1557,12 @@ func TestCountExistsPageUpdate(t *testing.T) {
 	// 5. Update（按主键更新）
 	t.Run("Update", func(t *testing.T) {
 		updated := &messageoption.GolangTest{Id: 9001, GroupId: 9, Ip: "192.168.1.1", Port: 5555}
-		if err := pbMySqlDB.Update(updated); err != nil {
+		if err := pdb.Update(updated); err != nil {
 			t.Fatalf("Update失败: %v", err)
 		}
 
 		got := &messageoption.GolangTest{}
-		if err := pbMySqlDB.FindOneByKV(got, "id", "9001"); err != nil {
+		if err := pdb.FindOneByKV(got, "id", "9001"); err != nil {
 			t.Fatalf("查询更新结果失败: %v", err)
 		}
 		if got.Ip != "192.168.1.1" || got.Port != 5555 {
@@ -1573,12 +1573,12 @@ func TestCountExistsPageUpdate(t *testing.T) {
 	// 6. UpdateByWhereWithArgs（按条件更新）
 	t.Run("UpdateByWhereWithArgs", func(t *testing.T) {
 		patch := &messageoption.GolangTest{Ip: "172.16.0.1"}
-		if err := pbMySqlDB.UpdateByWhereWithArgs(patch, "id = ?", []interface{}{9002}); err != nil {
+		if err := pdb.UpdateByWhereWithArgs(patch, "id = ?", []interface{}{9002}); err != nil {
 			t.Fatalf("UpdateByWhereWithArgs失败: %v", err)
 		}
 
 		got := &messageoption.GolangTest{}
-		if err := pbMySqlDB.FindOneByKV(got, "id", "9002"); err != nil {
+		if err := pdb.FindOneByKV(got, "id", "9002"); err != nil {
 			t.Fatalf("查询更新结果失败: %v", err)
 		}
 		if got.Ip != "172.16.0.1" {
@@ -1591,11 +1591,11 @@ func TestCountExistsPageUpdate(t *testing.T) {
 
 	// 7. DeleteByWhereWithArgs（按条件删除）
 	t.Run("DeleteByWhereWithArgs", func(t *testing.T) {
-		if err := pbMySqlDB.DeleteByWhereWithArgs(testTable, "id = ?", []interface{}{9005}); err != nil {
+		if err := pdb.DeleteByWhereWithArgs(testTable, "id = ?", []interface{}{9005}); err != nil {
 			t.Fatalf("DeleteByWhereWithArgs失败: %v", err)
 		}
 
-		exists, err := pbMySqlDB.Exists(testTable, "id = ?", []interface{}{9005})
+		exists, err := pdb.Exists(testTable, "id = ?", []interface{}{9005})
 		if err != nil {
 			t.Fatalf("Exists失败: %v", err)
 		}
@@ -1606,7 +1606,7 @@ func TestCountExistsPageUpdate(t *testing.T) {
 
 	// 8. Transaction（事务提交与回滚）
 	t.Run("Transaction", func(t *testing.T) {
-		err := pbMySqlDB.Transaction(func(tx *sql.Tx) error {
+		err := pdb.Transaction(func(tx *sql.Tx) error {
 			_, err := tx.Exec("UPDATE "+testTableSQLName(testTable)+" SET port = 6001 WHERE id = ?", 9003)
 			return err
 		})
@@ -1615,7 +1615,7 @@ func TestCountExistsPageUpdate(t *testing.T) {
 		}
 
 		got := &messageoption.GolangTest{}
-		if err := pbMySqlDB.FindOneByKV(got, "id", "9003"); err != nil {
+		if err := pdb.FindOneByKV(got, "id", "9003"); err != nil {
 			t.Fatalf("查询事务结果失败: %v", err)
 		}
 		if got.Port != 6001 {
@@ -1623,7 +1623,7 @@ func TestCountExistsPageUpdate(t *testing.T) {
 		}
 
 		rollbackErr := fmt.Errorf("触发回滚")
-		err = pbMySqlDB.Transaction(func(tx *sql.Tx) error {
+		err = pdb.Transaction(func(tx *sql.Tx) error {
 			if _, err := tx.Exec("UPDATE "+testTableSQLName(testTable)+" SET port = 7777 WHERE id = ?", 9003); err != nil {
 				return err
 			}
@@ -1633,7 +1633,7 @@ func TestCountExistsPageUpdate(t *testing.T) {
 			t.Fatal("预期事务返回错误")
 		}
 
-		if err := pbMySqlDB.FindOneByKV(got, "id", "9003"); err != nil {
+		if err := pdb.FindOneByKV(got, "id", "9003"); err != nil {
 			t.Fatalf("查询回滚结果失败: %v", err)
 		}
 		if got.Port != 6001 {
@@ -1646,14 +1646,14 @@ func TestCountExistsPageUpdate(t *testing.T) {
 
 // TestPKAndBatchInterfaces 集成测试：FindOneByPK/FindAllByKVIn/DeleteByKV/BatchSave/BatchDelete
 func TestPKAndBatchInterfaces(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable, WithPrimaryKey("id"))
+	pdb.RegisterTable(testTable, WithPrimaryKey("id"))
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
-	recreateTestTable(t, db, pbMySqlDB, testTable)
+	recreateTestTable(t, db, pdb, testTable)
 	if _, err := db.Exec("DELETE FROM " + testTableSQLName(testTable) + " WHERE group_id=8"); err != nil {
 		t.Logf("清理旧数据失败: %v", err)
 	}
@@ -1669,11 +1669,11 @@ func TestPKAndBatchInterfaces(t *testing.T) {
 		})
 	}
 	t.Run("BatchSave", func(t *testing.T) {
-		if err := pbMySqlDB.BatchSave(batch); err != nil {
+		if err := pdb.BatchSave(batch); err != nil {
 			t.Fatalf("BatchSave失败: %v", err)
 		}
 
-		count, err := pbMySqlDB.CountByWhereWithArgs(testTable, "group_id = ?", []interface{}{8})
+		count, err := pdb.CountByWhereWithArgs(testTable, "group_id = ?", []interface{}{8})
 		if err != nil {
 			t.Fatalf("统计失败: %v", err)
 		}
@@ -1683,7 +1683,7 @@ func TestPKAndBatchInterfaces(t *testing.T) {
 
 		// 再次BatchSave同主键应覆盖而非报错（REPLACE语义）
 		batch[0].(*messageoption.GolangTest).Port = 5999
-		if err := pbMySqlDB.BatchSave(batch); err != nil {
+		if err := pdb.BatchSave(batch); err != nil {
 			t.Fatalf("重复BatchSave失败: %v", err)
 		}
 	})
@@ -1691,7 +1691,7 @@ func TestPKAndBatchInterfaces(t *testing.T) {
 	// 2. FindOneByPK（按主键回查）
 	t.Run("FindOneByPK", func(t *testing.T) {
 		got := &messageoption.GolangTest{Id: 8001}
-		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		if err := pdb.FindOneByPK(got); err != nil {
 			t.Fatalf("FindOneByPK失败: %v", err)
 		}
 		if got.Port != 5999 || got.Ip != "10.8.0.1" {
@@ -1702,7 +1702,7 @@ func TestPKAndBatchInterfaces(t *testing.T) {
 	// 3. FindAllByKVIn（IN批量查询）
 	t.Run("FindAllByKVIn", func(t *testing.T) {
 		var list messageoption.GolangTestList
-		err := pbMySqlDB.FindAllByKVIn(&list, "id", []interface{}{8001, 8003})
+		err := pdb.FindAllByKVIn(&list, "id", []interface{}{8001, 8003})
 		if err != nil {
 			t.Fatalf("FindAllByKVIn失败: %v", err)
 		}
@@ -1711,7 +1711,7 @@ func TestPKAndBatchInterfaces(t *testing.T) {
 		}
 
 		// 空values应返回空列表且不报错
-		if err := pbMySqlDB.FindAllByKVIn(&list, "id", nil); err != nil {
+		if err := pdb.FindAllByKVIn(&list, "id", nil); err != nil {
 			t.Fatalf("空values查询失败: %v", err)
 		}
 		if len(list.TestList) != 0 {
@@ -1721,10 +1721,10 @@ func TestPKAndBatchInterfaces(t *testing.T) {
 
 	// 4. DeleteByKV
 	t.Run("DeleteByKV", func(t *testing.T) {
-		if err := pbMySqlDB.DeleteByKV(testTable, "id", 8004); err != nil {
+		if err := pdb.DeleteByKV(testTable, "id", 8004); err != nil {
 			t.Fatalf("DeleteByKV失败: %v", err)
 		}
-		exists, err := pbMySqlDB.Exists(testTable, "id = ?", []interface{}{8004})
+		exists, err := pdb.Exists(testTable, "id = ?", []interface{}{8004})
 		if err != nil {
 			t.Fatalf("Exists失败: %v", err)
 		}
@@ -1735,10 +1735,10 @@ func TestPKAndBatchInterfaces(t *testing.T) {
 
 	// 5. BatchDelete（按主键IN批量删除）
 	t.Run("BatchDelete", func(t *testing.T) {
-		if err := pbMySqlDB.BatchDelete(batch[:3]); err != nil {
+		if err := pdb.BatchDelete(batch[:3]); err != nil {
 			t.Fatalf("BatchDelete失败: %v", err)
 		}
-		count, err := pbMySqlDB.CountByWhereWithArgs(testTable, "group_id = ?", []interface{}{8})
+		count, err := pdb.CountByWhereWithArgs(testTable, "group_id = ?", []interface{}{8})
 		if err != nil {
 			t.Fatalf("统计失败: %v", err)
 		}
@@ -1753,14 +1753,14 @@ func TestPKAndBatchInterfaces(t *testing.T) {
 // TestGameServerInterfaces 集成测试：游戏服务器常用接口
 // FindOrCreate/FindAllByPKIn/IncrByPK/DecrByPKIfEnough/RunInTransaction/FindOneByPKForUpdate
 func TestGameServerInterfaces(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable, WithPrimaryKey("id"))
+	pdb.RegisterTable(testTable, WithPrimaryKey("id"))
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
-	recreateTestTable(t, db, pbMySqlDB, testTable)
+	recreateTestTable(t, db, pdb, testTable)
 	if _, err := db.Exec("DELETE FROM " + testTableSQLName(testTable) + " WHERE group_id=7"); err != nil {
 		t.Logf("清理旧数据失败: %v", err)
 	}
@@ -1768,7 +1768,7 @@ func TestGameServerInterfaces(t *testing.T) {
 	// 1. FindOrCreate（玩家首次登录：第一次创建，第二次读取）
 	t.Run("FindOrCreate", func(t *testing.T) {
 		player := &messageoption.GolangTest{Id: 7001, GroupId: 7, Ip: "10.7.0.1", Port: 100}
-		created, err := pbMySqlDB.FindOrCreate(player)
+		created, err := pdb.FindOrCreate(player)
 		if err != nil {
 			t.Fatalf("FindOrCreate失败: %v", err)
 		}
@@ -1778,7 +1778,7 @@ func TestGameServerInterfaces(t *testing.T) {
 
 		// 第二次：应读到已有数据，而不是覆盖
 		again := &messageoption.GolangTest{Id: 7001}
-		created, err = pbMySqlDB.FindOrCreate(again)
+		created, err = pdb.FindOrCreate(again)
 		if err != nil {
 			t.Fatalf("二次FindOrCreate失败: %v", err)
 		}
@@ -1794,14 +1794,14 @@ func TestGameServerInterfaces(t *testing.T) {
 	t.Run("FindAllByPKIn", func(t *testing.T) {
 		for i := 2; i <= 4; i++ {
 			item := &messageoption.GolangTest{Id: uint32(7000 + i), GroupId: 7, Port: uint32(100 * i)}
-			if err := pbMySqlDB.Save(item); err != nil {
+			if err := pdb.Save(item); err != nil {
 				t.Fatalf("准备数据失败: %v", err)
 			}
 		}
 
 		var list messageoption.GolangTestList
 		// 7999不存在，应只返回3条
-		err := pbMySqlDB.FindAllByPKIn(&list, []interface{}{7001, 7002, 7003, 7999})
+		err := pdb.FindAllByPKIn(&list, []interface{}{7001, 7002, 7003, 7999})
 		if err != nil {
 			t.Fatalf("FindAllByPKIn失败: %v", err)
 		}
@@ -1810,7 +1810,7 @@ func TestGameServerInterfaces(t *testing.T) {
 		}
 
 		// 空keys返回空列表
-		if err := pbMySqlDB.FindAllByPKIn(&list, nil); err != nil {
+		if err := pdb.FindAllByPKIn(&list, nil); err != nil {
 			t.Fatalf("空keys查询失败: %v", err)
 		}
 		if len(list.TestList) != 0 {
@@ -1821,12 +1821,12 @@ func TestGameServerInterfaces(t *testing.T) {
 	// 3. IncrByPK（原子加经验/货币）
 	t.Run("IncrByPK", func(t *testing.T) {
 		player := &messageoption.GolangTest{Id: 7001}
-		if err := pbMySqlDB.IncrByPK(player, "port", 50); err != nil {
+		if err := pdb.IncrByPK(player, "port", 50); err != nil {
 			t.Fatalf("IncrByPK失败: %v", err)
 		}
 
 		got := &messageoption.GolangTest{Id: 7001}
-		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		if err := pdb.FindOneByPK(got); err != nil {
 			t.Fatalf("回查失败: %v", err)
 		}
 		if got.Port != 150 {
@@ -1834,7 +1834,7 @@ func TestGameServerInterfaces(t *testing.T) {
 		}
 
 		// 不存在的字段应报错
-		if err := pbMySqlDB.IncrByPK(player, "not_exist", 1); err == nil {
+		if err := pdb.IncrByPK(player, "not_exist", 1); err == nil {
 			t.Error("不存在的字段应返回错误")
 		}
 	})
@@ -1842,7 +1842,7 @@ func TestGameServerInterfaces(t *testing.T) {
 	// 4. DecrByPKIfEnough（余额充足扣减，不足不扣）
 	t.Run("DecrByPKIfEnough", func(t *testing.T) {
 		player := &messageoption.GolangTest{Id: 7001} // port当前150
-		ok, err := pbMySqlDB.DecrByPKIfEnough(player, "port", 100)
+		ok, err := pdb.DecrByPKIfEnough(player, "port", 100)
 		if err != nil {
 			t.Fatalf("DecrByPKIfEnough失败: %v", err)
 		}
@@ -1851,7 +1851,7 @@ func TestGameServerInterfaces(t *testing.T) {
 		}
 
 		// 余额只剩50，扣100应失败且不改数据
-		ok, err = pbMySqlDB.DecrByPKIfEnough(player, "port", 100)
+		ok, err = pdb.DecrByPKIfEnough(player, "port", 100)
 		if err != nil {
 			t.Fatalf("DecrByPKIfEnough失败: %v", err)
 		}
@@ -1860,7 +1860,7 @@ func TestGameServerInterfaces(t *testing.T) {
 		}
 
 		got := &messageoption.GolangTest{Id: 7001}
-		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		if err := pdb.FindOneByPK(got); err != nil {
 			t.Fatalf("回查失败: %v", err)
 		}
 		if got.Port != 50 {
@@ -1868,7 +1868,7 @@ func TestGameServerInterfaces(t *testing.T) {
 		}
 
 		// 负数delta应报错
-		if _, err := pbMySqlDB.DecrByPKIfEnough(player, "port", -1); err == nil {
+		if _, err := pdb.DecrByPKIfEnough(player, "port", -1); err == nil {
 			t.Error("负数delta应返回错误")
 		}
 	})
@@ -1876,7 +1876,7 @@ func TestGameServerInterfaces(t *testing.T) {
 	// 5. RunInTransaction（事务内复用全部接口 + 行锁 + 回滚验证）
 	t.Run("RunInTransaction", func(t *testing.T) {
 		// 事务内：锁行 -> 扣减 -> 更新另一条（模拟扣钱+发道具），提交
-		err := pbMySqlDB.RunInTransaction(func(tx *PbMysqlDB) error {
+		err := pdb.RunInTransaction(func(tx *DB) error {
 			locked := &messageoption.GolangTest{Id: 7001}
 			if err := tx.FindOneByPKForUpdate(locked); err != nil {
 				return err
@@ -1891,7 +1891,7 @@ func TestGameServerInterfaces(t *testing.T) {
 		}
 
 		got := &messageoption.GolangTest{Id: 7001}
-		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		if err := pdb.FindOneByPK(got); err != nil {
 			t.Fatalf("回查失败: %v", err)
 		}
 		if got.Port != 40 {
@@ -1900,7 +1900,7 @@ func TestGameServerInterfaces(t *testing.T) {
 
 		// 回滚：中途失败，所有修改都不应生效
 		rollbackErr := fmt.Errorf("模拟发道具失败")
-		err = pbMySqlDB.RunInTransaction(func(tx *PbMysqlDB) error {
+		err = pdb.RunInTransaction(func(tx *DB) error {
 			if err := tx.IncrByPK(&messageoption.GolangTest{Id: 7001}, "port", 1000); err != nil {
 				return err
 			}
@@ -1910,7 +1910,7 @@ func TestGameServerInterfaces(t *testing.T) {
 			t.Fatal("预期事务返回错误")
 		}
 
-		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		if err := pdb.FindOneByPK(got); err != nil {
 			t.Fatalf("回查失败: %v", err)
 		}
 		if got.Port != 40 {
@@ -1918,7 +1918,7 @@ func TestGameServerInterfaces(t *testing.T) {
 		}
 
 		// 事务外调用FindOneByPKForUpdate应报错
-		if err := pbMySqlDB.FindOneByPKForUpdate(got); err == nil {
+		if err := pdb.FindOneByPKForUpdate(got); err == nil {
 			t.Error("事务外调用FindOneByPKForUpdate应返回错误")
 		}
 	})
@@ -1928,31 +1928,31 @@ func TestGameServerInterfaces(t *testing.T) {
 
 // TestExtendedCRUDValidation 单元测试：新增增删改查接口的参数校验（无需数据库）
 func TestExtendedCRUDValidation(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
-	pbMySqlDB.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
+	pdb := NewDB()
+	pdb.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
 	msg := &messageoption.GolangTest{Id: 1}
 
-	if err := pbMySqlDB.UpdateFieldsByPK(msg); err == nil {
+	if err := pdb.UpdateFieldsByPK(msg); err == nil {
 		t.Error("UpdateFieldsByPK不传字段应报错")
 	}
-	if err := pbMySqlDB.UpdateFieldsByPK(msg, "no_such_field"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+	if err := pdb.UpdateFieldsByPK(msg, "no_such_field"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
 		t.Errorf("UpdateFieldsByPK未知字段应返回ErrFieldNotFound，实际: %v", err)
 	}
-	if err := pbMySqlDB.UpdateKVByPK(msg, "no_such_field", 1); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+	if err := pdb.UpdateKVByPK(msg, "no_such_field", 1); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
 		t.Errorf("UpdateKVByPK未知字段应返回ErrFieldNotFound，实际: %v", err)
 	}
-	if _, err := pbMySqlDB.UpdateIfVersion(msg, "no_such_field"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+	if _, err := pdb.UpdateIfVersion(msg, "no_such_field"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
 		t.Errorf("UpdateIfVersion未知版本字段应返回ErrFieldNotFound，实际: %v", err)
 	}
-	if _, err := pbMySqlDB.UpdateIfVersion(&messageoption.GolangTest{Id: 1}, "group_id"); err == nil {
+	if _, err := pdb.UpdateIfVersion(&messageoption.GolangTest{Id: 1}, "group_id"); err == nil {
 		t.Error("UpdateIfVersion无可更新字段应报错")
 	}
 
 	var list messageoption.GolangTestList
-	if err := pbMySqlDB.FindPageByCursor(&list, "", nil, "id", nil, 0); err == nil {
+	if err := pdb.FindPageByCursor(&list, "", nil, "id", nil, 0); err == nil {
 		t.Error("FindPageByCursor pageSize<1应报错")
 	}
-	if err := pbMySqlDB.FindPageByCursor(&list, "", nil, "no_such_field", nil, 10); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+	if err := pdb.FindPageByCursor(&list, "", nil, "no_such_field", nil, 10); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
 		t.Errorf("FindPageByCursor未知游标字段应返回ErrFieldNotFound，实际: %v", err)
 	}
 }
@@ -1960,15 +1960,15 @@ func TestExtendedCRUDValidation(t *testing.T) {
 // TestExtendedCRUDInterfaces 集成测试：InsertIgnore/InsertReturningID/UpdateFieldsByPK/
 // UpdateKVByPK/UpdateIfVersion/ExistsByPK/FindOneWithOptions/FindPageByCursor
 func TestExtendedCRUDInterfaces(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable, WithPrimaryKey("id"), WithAutoIncrementKey("id"))
+	pdb.RegisterTable(testTable, WithPrimaryKey("id"), WithAutoIncrementKey("id"))
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	// 其它测试可能已用无主键的schema建过golang_test，重建以保证主键/自增约束生效
-	recreateTestTable(t, db, pbMySqlDB, testTable)
+	recreateTestTable(t, db, pdb, testTable)
 	if _, err := db.Exec("DELETE FROM " + testTableSQLName(testTable) + " WHERE player_id=9900"); err != nil {
 		t.Logf("清理旧数据失败: %v", err)
 	}
@@ -1976,7 +1976,7 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 	// 1. InsertIgnore：首次插入成功，重复插入跳过
 	t.Run("InsertIgnore", func(t *testing.T) {
 		row := &messageoption.GolangTest{Id: 9901, PlayerId: 9900, Ip: "10.9.0.1", Port: 1}
-		inserted, err := pbMySqlDB.InsertIgnore(row)
+		inserted, err := pdb.InsertIgnore(row)
 		if err != nil {
 			t.Fatalf("InsertIgnore失败: %v", err)
 		}
@@ -1985,7 +1985,7 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 		}
 
 		dup := &messageoption.GolangTest{Id: 9901, PlayerId: 9900, Ip: "10.9.0.999", Port: 999}
-		inserted, err = pbMySqlDB.InsertIgnore(dup)
+		inserted, err = pdb.InsertIgnore(dup)
 		if err != nil {
 			t.Fatalf("重复InsertIgnore失败: %v", err)
 		}
@@ -1995,7 +1995,7 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 
 		// 原数据应未被覆盖
 		got := &messageoption.GolangTest{Id: 9901}
-		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		if err := pdb.FindOneByPK(got); err != nil {
 			t.Fatalf("回查失败: %v", err)
 		}
 		if got.Port != 1 {
@@ -2005,14 +2005,14 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 
 	// 2. InsertReturningID：自增主键回填
 	t.Run("InsertReturningID", func(t *testing.T) {
-		id, err := pbMySqlDB.InsertReturningID(&messageoption.GolangTest{PlayerId: 9900, Ip: "10.9.0.2"})
+		id, err := pdb.InsertReturningID(&messageoption.GolangTest{PlayerId: 9900, Ip: "10.9.0.2"})
 		if err != nil {
 			t.Fatalf("InsertReturningID失败: %v", err)
 		}
 		if id <= 0 {
 			t.Fatalf("预期返回自增ID>0，实际%d", id)
 		}
-		if ok, err := pbMySqlDB.ExistsByPK(&messageoption.GolangTest{Id: uint32(id)}); err != nil || !ok {
+		if ok, err := pdb.ExistsByPK(&messageoption.GolangTest{Id: uint32(id)}); err != nil || !ok {
 			t.Errorf("按返回ID查询应存在: ok=%v, err=%v", ok, err)
 		}
 	})
@@ -2020,12 +2020,12 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 	// 3. UpdateFieldsByPK：部分更新，不动其他字段
 	t.Run("UpdateFieldsByPK", func(t *testing.T) {
 		row := &messageoption.GolangTest{Id: 9901, Ip: "10.9.9.9", Port: 777}
-		if err := pbMySqlDB.UpdateFieldsByPK(row, "ip"); err != nil {
+		if err := pdb.UpdateFieldsByPK(row, "ip"); err != nil {
 			t.Fatalf("UpdateFieldsByPK失败: %v", err)
 		}
 
 		got := &messageoption.GolangTest{Id: 9901}
-		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		if err := pdb.FindOneByPK(got); err != nil {
 			t.Fatalf("回查失败: %v", err)
 		}
 		if got.Ip != "10.9.9.9" {
@@ -2038,11 +2038,11 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 
 	// 4. UpdateKVByPK：单字段设值
 	t.Run("UpdateKVByPK", func(t *testing.T) {
-		if err := pbMySqlDB.UpdateKVByPK(&messageoption.GolangTest{Id: 9901}, "port", 42); err != nil {
+		if err := pdb.UpdateKVByPK(&messageoption.GolangTest{Id: 9901}, "port", 42); err != nil {
 			t.Fatalf("UpdateKVByPK失败: %v", err)
 		}
 		got := &messageoption.GolangTest{Id: 9901}
-		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		if err := pdb.FindOneByPK(got); err != nil {
 			t.Fatalf("回查失败: %v", err)
 		}
 		if got.Port != 42 {
@@ -2054,7 +2054,7 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 	t.Run("UpdateIfVersion", func(t *testing.T) {
 		// 当前group_id=0；用正确版本更新成功，group_id自动+1
 		row := &messageoption.GolangTest{Id: 9901, Ip: "10.9.1.1", GroupId: 0}
-		ok, err := pbMySqlDB.UpdateIfVersion(row, "group_id")
+		ok, err := pdb.UpdateIfVersion(row, "group_id")
 		if err != nil {
 			t.Fatalf("UpdateIfVersion失败: %v", err)
 		}
@@ -2063,7 +2063,7 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 		}
 
 		got := &messageoption.GolangTest{Id: 9901}
-		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+		if err := pdb.FindOneByPK(got); err != nil {
 			t.Fatalf("回查失败: %v", err)
 		}
 		if got.GroupId != 1 {
@@ -2075,7 +2075,7 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 
 		// 用过期版本（0）再更新应失败
 		stale := &messageoption.GolangTest{Id: 9901, Ip: "10.9.2.2", GroupId: 0}
-		ok, err = pbMySqlDB.UpdateIfVersion(stale, "group_id")
+		ok, err = pdb.UpdateIfVersion(stale, "group_id")
 		if err != nil {
 			t.Fatalf("UpdateIfVersion失败: %v", err)
 		}
@@ -2086,11 +2086,11 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 
 	// 6. ExistsByPK
 	t.Run("ExistsByPK", func(t *testing.T) {
-		ok, err := pbMySqlDB.ExistsByPK(&messageoption.GolangTest{Id: 9901})
+		ok, err := pdb.ExistsByPK(&messageoption.GolangTest{Id: 9901})
 		if err != nil || !ok {
 			t.Errorf("存在的主键应返回true: ok=%v, err=%v", ok, err)
 		}
-		ok, err = pbMySqlDB.ExistsByPK(&messageoption.GolangTest{Id: 99999999})
+		ok, err = pdb.ExistsByPK(&messageoption.GolangTest{Id: 99999999})
 		if err != nil || ok {
 			t.Errorf("不存在的主键应返回false: ok=%v, err=%v", ok, err)
 		}
@@ -2104,12 +2104,12 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 			&messageoption.GolangTest{Id: 9904, PlayerId: 9900, Port: 300},
 			&messageoption.GolangTest{Id: 9905, PlayerId: 9900, Port: 200},
 		}
-		if err := pbMySqlDB.BatchSave(batch); err != nil {
+		if err := pdb.BatchSave(batch); err != nil {
 			t.Fatalf("准备数据失败: %v", err)
 		}
 
 		top := &messageoption.GolangTest{}
-		err := pbMySqlDB.FindOneWithOptions(top, "player_id = ?", []interface{}{9900}, QueryOptions{OrderBy: "port DESC"})
+		err := pdb.FindOneWithOptions(top, "player_id = ?", []interface{}{9900}, QueryOptions{OrderBy: "port DESC"})
 		if err != nil {
 			t.Fatalf("FindOneWithOptions失败: %v", err)
 		}
@@ -2121,7 +2121,7 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 	// 8. FindPageByCursor：游标分页
 	t.Run("FindPageByCursor", func(t *testing.T) {
 		var page1 messageoption.GolangTestList
-		if err := pbMySqlDB.FindPageByCursor(&page1, "player_id = ?", []interface{}{9900}, "id", nil, 3); err != nil {
+		if err := pdb.FindPageByCursor(&page1, "player_id = ?", []interface{}{9900}, "id", nil, 3); err != nil {
 			t.Fatalf("首页查询失败: %v", err)
 		}
 		if len(page1.TestList) != 3 {
@@ -2130,7 +2130,7 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 
 		cursor := page1.TestList[len(page1.TestList)-1].Id
 		var page2 messageoption.GolangTestList
-		if err := pbMySqlDB.FindPageByCursor(&page2, "player_id = ?", []interface{}{9900}, "id", cursor, 3); err != nil {
+		if err := pdb.FindPageByCursor(&page2, "player_id = ?", []interface{}{9900}, "id", cursor, 3); err != nil {
 			t.Fatalf("次页查询失败: %v", err)
 		}
 		for _, item := range page2.TestList {
@@ -2145,12 +2145,12 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 
 // TestWithTableNameRegistration 单元测试：自定义表名只影响SQL，注册键仍为proto full name
 func TestWithTableNameRegistration(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	msg := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(msg, WithTableName("player_data"), WithPrimaryKey("id"))
+	pdb.RegisterTable(msg, WithTableName("player_data"), WithPrimaryKey("id"))
 
 	// 注册键固定为proto full name，否则tableForMessage按FullName查表会miss
-	table, ok := pbMySqlDB.Tables[GetTableName(msg)]
+	table, ok := pdb.Tables[GetTableName(msg)]
 	if !ok {
 		t.Fatal("注册键应为proto full name")
 	}
@@ -2159,10 +2159,10 @@ func TestWithTableNameRegistration(t *testing.T) {
 	}
 
 	// 行消息与列表消息的查找路径都应能解析
-	if _, err := pbMySqlDB.tableForMessage(msg); err != nil {
+	if _, err := pdb.tableForMessage(msg); err != nil {
 		t.Errorf("tableForMessage应能解析自定义表名的注册: %v", err)
 	}
-	if _, _, err := resolveListTable(pbMySqlDB.Tables, &messageoption.GolangTestList{}); err != nil {
+	if _, _, err := resolveListTable(pdb.Tables, &messageoption.GolangTestList{}); err != nil {
 		t.Errorf("resolveListTable应能解析自定义表名的注册: %v", err)
 	}
 
@@ -2173,7 +2173,7 @@ func TestWithTableNameRegistration(t *testing.T) {
 	if !strings.Contains(table.selectFieldsSQL, "`player_data`") {
 		t.Errorf("SELECT模板应使用自定义表名: %s", table.selectFieldsSQL)
 	}
-	if !strings.Contains(pbMySqlDB.GetCreateTableSQL(msg), "`player_data`") {
+	if !strings.Contains(pdb.GetCreateTableSQL(msg), "`player_data`") {
 		t.Errorf("建表SQL应使用自定义表名")
 	}
 }
@@ -2205,34 +2205,34 @@ func TestWrapExecErr(t *testing.T) {
 
 // TestUpdateFieldsIfVersionValidation 单元测试：显式字段CAS的参数校验（无需数据库）
 func TestUpdateFieldsIfVersionValidation(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
-	pbMySqlDB.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
+	pdb := NewDB()
+	pdb.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
 	msg := &messageoption.GolangTest{Id: 1}
 
-	if _, err := pbMySqlDB.UpdateFieldsIfVersion(msg, "group_id"); err == nil {
+	if _, err := pdb.UpdateFieldsIfVersion(msg, "group_id"); err == nil {
 		t.Error("不传字段应报错")
 	}
-	if _, err := pbMySqlDB.UpdateFieldsIfVersion(msg, "no_such_field", "ip"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+	if _, err := pdb.UpdateFieldsIfVersion(msg, "no_such_field", "ip"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
 		t.Errorf("未知版本字段应返回ErrFieldNotFound，实际: %v", err)
 	}
-	if _, err := pbMySqlDB.UpdateFieldsIfVersion(msg, "group_id", "no_such_field"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+	if _, err := pdb.UpdateFieldsIfVersion(msg, "group_id", "no_such_field"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
 		t.Errorf("未知更新字段应返回ErrFieldNotFound，实际: %v", err)
 	}
 }
 
 // TestWithContextUnit 单元测试：WithContext返回共享映射的新实例，未绑定时退回Background
 func TestWithContextUnit(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
-	pbMySqlDB.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
+	pdb := NewDB()
+	pdb.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
 
-	if pbMySqlDB.context() != context.Background() {
+	if pdb.context() != context.Background() {
 		t.Error("未绑定ctx时应返回Background")
 	}
 
 	type ctxKey struct{}
 	ctx := context.WithValue(context.Background(), ctxKey{}, "v")
-	bound := pbMySqlDB.WithContext(ctx)
-	if bound == pbMySqlDB {
+	bound := pdb.WithContext(ctx)
+	if bound == pdb {
 		t.Error("WithContext应返回新实例")
 	}
 	if bound.context() != ctx {
@@ -2242,7 +2242,7 @@ func TestWithContextUnit(t *testing.T) {
 		t.Errorf("新实例应共享已注册的表: %v", err)
 	}
 	// 原实例不受影响
-	if pbMySqlDB.ctx != nil {
+	if pdb.ctx != nil {
 		t.Error("WithContext不应修改原实例")
 	}
 }
@@ -2250,27 +2250,27 @@ func TestWithContextUnit(t *testing.T) {
 // TestTableNameAndCASIntegration 集成测试：自定义表名接线全流程（对应已有表player_data场景）：
 // Insert重复键→ErrDuplicateKey；UpdateFieldsIfVersion写零值字段+版本冲突；WithContext取消传播
 func TestTableNameAndCASIntegration(t *testing.T) {
-	pbMySqlDB := NewPbMysqlDB()
+	pdb := NewDB()
 	testTable := &messageoption.GolangTest{}
-	pbMySqlDB.RegisterTable(testTable, WithTableName("golang_test_named"), WithPrimaryKey("id"))
+	pdb.RegisterTable(testTable, WithTableName("golang_test_named"), WithPrimaryKey("id"))
 
-	db := mustOpenTestDB(t, pbMySqlDB)
+	db := mustOpenTestDB(t, pdb)
 	defer closeTestDB(t, db)
 
 	if _, err := db.Exec("DROP TABLE IF EXISTS `golang_test_named`"); err != nil {
 		t.Fatalf("清理旧表失败: %v", err)
 	}
-	if err := pbMySqlDB.CreateOrUpdateTable(testTable); err != nil {
+	if err := pdb.CreateOrUpdateTable(testTable); err != nil {
 		t.Fatalf("按自定义表名建表失败: %v", err)
 	}
 
 	// Insert + 回读都应落在自定义表名上
 	row := &messageoption.GolangTest{Id: 11, Ip: "10.11.0.1", Port: 7, GroupId: 0}
-	if err := pbMySqlDB.Insert(row); err != nil {
+	if err := pdb.Insert(row); err != nil {
 		t.Fatalf("Insert失败: %v", err)
 	}
 	got := &messageoption.GolangTest{Id: 11}
-	if err := pbMySqlDB.FindOneByPK(got); err != nil {
+	if err := pdb.FindOneByPK(got); err != nil {
 		t.Fatalf("FindOneByPK失败: %v", err)
 	}
 	if got.Ip != "10.11.0.1" {
@@ -2278,13 +2278,13 @@ func TestTableNameAndCASIntegration(t *testing.T) {
 	}
 
 	// 重复插入→errors.Is(err, ErrDuplicateKey)
-	if err := pbMySqlDB.Insert(&messageoption.GolangTest{Id: 11}); !errors.Is(err, ErrDuplicateKey) {
+	if err := pdb.Insert(&messageoption.GolangTest{Id: 11}); !errors.Is(err, ErrDuplicateKey) {
 		t.Errorf("重复主键应返回ErrDuplicateKey，实际: %v", err)
 	}
 
 	// UpdateFieldsIfVersion：显式字段列表，零值字段（空字符串）也能写入
 	clear := &messageoption.GolangTest{Id: 11, Ip: "", GroupId: 0}
-	ok, err := pbMySqlDB.UpdateFieldsIfVersion(clear, "group_id", "ip")
+	ok, err := pdb.UpdateFieldsIfVersion(clear, "group_id", "ip")
 	if err != nil {
 		t.Fatalf("UpdateFieldsIfVersion失败: %v", err)
 	}
@@ -2292,7 +2292,7 @@ func TestTableNameAndCASIntegration(t *testing.T) {
 		t.Fatal("版本匹配时应更新成功")
 	}
 	got = &messageoption.GolangTest{Id: 11}
-	if err := pbMySqlDB.FindOneByPK(got); err != nil {
+	if err := pdb.FindOneByPK(got); err != nil {
 		t.Fatalf("回查失败: %v", err)
 	}
 	if got.Ip != "" {
@@ -2304,7 +2304,7 @@ func TestTableNameAndCASIntegration(t *testing.T) {
 
 	// 过期版本→false
 	stale := &messageoption.GolangTest{Id: 11, Ip: "10.11.9.9", GroupId: 0}
-	ok, err = pbMySqlDB.UpdateFieldsIfVersion(stale, "group_id", "ip")
+	ok, err = pdb.UpdateFieldsIfVersion(stale, "group_id", "ip")
 	if err != nil {
 		t.Fatalf("UpdateFieldsIfVersion失败: %v", err)
 	}
@@ -2315,7 +2315,7 @@ func TestTableNameAndCASIntegration(t *testing.T) {
 	// WithContext：已取消的ctx应中断查询
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	if err := pbMySqlDB.WithContext(ctx).FindOneByPK(&messageoption.GolangTest{Id: 11}); err == nil {
+	if err := pdb.WithContext(ctx).FindOneByPK(&messageoption.GolangTest{Id: 11}); err == nil {
 		t.Error("已取消的context应中断查询")
 	}
 

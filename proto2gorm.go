@@ -11,23 +11,23 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// PbGormDB keeps the protobuf mapping layer, while delegating database access to GORM.
-type PbGormDB struct {
+// GormDB keeps the protobuf mapping layer, while delegating database access to GORM.
+type GormDB struct {
 	Tables map[string]*MessageTable
 	DB     *gorm.DB
 	DBName string
 }
 
-func NewPbGormDB(db *gorm.DB, dbname string) *PbGormDB {
-	return &PbGormDB{
+func NewGormDB(db *gorm.DB, dbname string) *GormDB {
+	return &GormDB{
 		Tables: make(map[string]*MessageTable),
 		DB:     db,
 		DBName: dbname,
 	}
 }
 
-func (p *PbGormDB) WithDB(db *gorm.DB) *PbGormDB {
-	return &PbGormDB{
+func (p *GormDB) WithDB(db *gorm.DB) *GormDB {
+	return &GormDB{
 		Tables: p.Tables,
 		DB:     db,
 		DBName: p.DBName,
@@ -36,12 +36,12 @@ func (p *PbGormDB) WithDB(db *gorm.DB) *PbGormDB {
 
 // RegisterTable 注册Protobuf与表的映射关系。注册键固定为proto full name；
 // table.tableName仅决定生成SQL中的表名，可用WithTableName自定义。
-func (p *PbGormDB) RegisterTable(m proto.Message, opts ...TableOption) {
+func (p *GormDB) RegisterTable(m proto.Message, opts ...TableOption) {
 	table := newMessageTable(m, opts...)
 	p.Tables[GetTableName(m)] = table
 }
 
-func (p *PbGormDB) CreateOrUpdateTable(m proto.Message) error {
+func (p *GormDB) CreateOrUpdateTable(m proto.Message) error {
 	table, err := p.tableForMessage(m)
 	if err != nil {
 		return err
@@ -49,7 +49,7 @@ func (p *PbGormDB) CreateOrUpdateTable(m proto.Message) error {
 	return p.DB.Exec(table.GetCreateTableSQL()).Error
 }
 
-func (p *PbGormDB) GetCreateTableSQL(message proto.Message) string {
+func (p *GormDB) GetCreateTableSQL(message proto.Message) string {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
 	if !ok {
@@ -58,7 +58,7 @@ func (p *PbGormDB) GetCreateTableSQL(message proto.Message) string {
 	return table.GetCreateTableSQL()
 }
 
-func (p *PbGormDB) Insert(message proto.Message) error {
+func (p *GormDB) Insert(message proto.Message) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -72,7 +72,7 @@ func (p *PbGormDB) Insert(message proto.Message) error {
 	return p.DB.Table(escapeMySQLName(table.tableName)).Create(values).Error
 }
 
-func (p *PbGormDB) BatchInsert(messages []proto.Message) error {
+func (p *GormDB) BatchInsert(messages []proto.Message) error {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -109,7 +109,7 @@ func (p *PbGormDB) BatchInsert(messages []proto.Message) error {
 	return nil
 }
 
-func (p *PbGormDB) Save(message proto.Message) error {
+func (p *GormDB) Save(message proto.Message) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -125,12 +125,12 @@ func (p *PbGormDB) Save(message proto.Message) error {
 		Create(values).Error
 }
 
-func (p *PbGormDB) InsertOnDupUpdate(message proto.Message) error {
+func (p *GormDB) InsertOnDupUpdate(message proto.Message) error {
 	return p.Save(message)
 }
 
 // InsertIgnore 幂等插入：主键/唯一键冲突时跳过不报错。返回是否实际插入了新行
-func (p *PbGormDB) InsertIgnore(message proto.Message) (bool, error) {
+func (p *GormDB) InsertIgnore(message proto.Message) (bool, error) {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return false, err
@@ -151,7 +151,7 @@ func (p *PbGormDB) InsertIgnore(message proto.Message) (bool, error) {
 }
 
 // InsertReturningID 插入并返回自增主键ID（LAST_INSERT_ID，同一连接内执行保证正确）
-func (p *PbGormDB) InsertReturningID(message proto.Message) (int64, error) {
+func (p *GormDB) InsertReturningID(message proto.Message) (int64, error) {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return 0, err
@@ -173,7 +173,7 @@ func (p *PbGormDB) InsertReturningID(message proto.Message) (int64, error) {
 }
 
 // BatchSave 批量保存（INSERT ... ON DUPLICATE KEY UPDATE，自动分批）
-func (p *PbGormDB) BatchSave(messages []proto.Message) error {
+func (p *GormDB) BatchSave(messages []proto.Message) error {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -212,7 +212,7 @@ func (p *PbGormDB) BatchSave(messages []proto.Message) error {
 	return nil
 }
 
-func (p *PbGormDB) Update(message proto.Message) error {
+func (p *GormDB) Update(message proto.Message) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -234,7 +234,7 @@ func (p *PbGormDB) Update(message proto.Message) error {
 	return p.DB.Table(escapeMySQLName(table.tableName)).Where(whereClause, whereArgs...).Updates(values).Error
 }
 
-func (p *PbGormDB) UpdateByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+func (p *GormDB) UpdateByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -252,7 +252,7 @@ func (p *PbGormDB) UpdateByWhereWithArgs(message proto.Message, whereClause stri
 }
 
 // UpdateFieldsByPK 按主键只更新指定字段（部分更新），避免Update全字段覆盖冲掉并发写入
-func (p *PbGormDB) UpdateFieldsByPK(message proto.Message, fields ...string) error {
+func (p *GormDB) UpdateFieldsByPK(message proto.Message, fields ...string) error {
 	if len(fields) == 0 {
 		return errors.New("no fields to update")
 	}
@@ -282,7 +282,7 @@ func (p *PbGormDB) UpdateFieldsByPK(message proto.Message, fields ...string) err
 }
 
 // UpdateKVByPK 按主键设置单个字段的值（如改状态、封号）
-func (p *PbGormDB) UpdateKVByPK(message proto.Message, field string, value interface{}) error {
+func (p *GormDB) UpdateKVByPK(message proto.Message, field string, value interface{}) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -300,7 +300,7 @@ func (p *PbGormDB) UpdateKVByPK(message proto.Message, field string, value inter
 
 // UpdateIfVersion 乐观锁CAS更新：按主键更新消息中已设置的字段（versionField自动+1），
 // 仅当数据库中versionField等于message当前值时生效。返回false表示版本冲突，调用方应重读后重试
-func (p *PbGormDB) UpdateIfVersion(message proto.Message, versionField string) (bool, error) {
+func (p *GormDB) UpdateIfVersion(message proto.Message, versionField string) (bool, error) {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return false, err
@@ -347,7 +347,7 @@ func (p *PbGormDB) UpdateIfVersion(message proto.Message, versionField string) (
 
 // UpdateFieldsIfVersion 乐观锁CAS+显式字段列表：不用Has()自动挑字段，
 // 规避proto3隐式presence下零值字段被跳过的坑。返回false=版本冲突
-func (p *PbGormDB) UpdateFieldsIfVersion(message proto.Message, versionField string, fields ...string) (bool, error) {
+func (p *GormDB) UpdateFieldsIfVersion(message proto.Message, versionField string, fields ...string) (bool, error) {
 	if len(fields) == 0 {
 		return false, errors.New("no fields to update")
 	}
@@ -397,7 +397,7 @@ func (p *PbGormDB) UpdateFieldsIfVersion(message proto.Message, versionField str
 	return result.RowsAffected > 0, nil
 }
 
-func (p *PbGormDB) Delete(message proto.Message) error {
+func (p *GormDB) Delete(message proto.Message) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -411,7 +411,7 @@ func (p *PbGormDB) Delete(message proto.Message) error {
 	return p.DB.Table(escapeMySQLName(table.tableName)).Where(whereClause, whereArgs...).Delete(nil).Error
 }
 
-func (p *PbGormDB) DeleteByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+func (p *GormDB) DeleteByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -421,12 +421,12 @@ func (p *PbGormDB) DeleteByWhereWithArgs(message proto.Message, whereClause stri
 }
 
 // DeleteByKV 按单个字段等值条件删除
-func (p *PbGormDB) DeleteByKV(message proto.Message, key string, value interface{}) error {
+func (p *GormDB) DeleteByKV(message proto.Message, key string, value interface{}) error {
 	return p.DeleteByWhereWithArgs(message, escapeMySQLName(key)+" = ?", []interface{}{value})
 }
 
 // BatchDelete 按主键批量删除（DELETE ... WHERE pk IN (...)，自动分批）
-func (p *PbGormDB) BatchDelete(messages []proto.Message) error {
+func (p *GormDB) BatchDelete(messages []proto.Message) error {
 	if len(messages) == 0 {
 		return nil
 	}
@@ -468,12 +468,12 @@ func (p *PbGormDB) BatchDelete(messages []proto.Message) error {
 	return nil
 }
 
-func (p *PbGormDB) FindOneByKV(message proto.Message, whereKey string, whereVal string) error {
+func (p *GormDB) FindOneByKV(message proto.Message, whereKey string, whereVal string) error {
 	return p.FindOneByWhereWithArgs(message, fmt.Sprintf("%s = ?", escapeMySQLName(whereKey)), []interface{}{whereVal})
 }
 
 // FindOneByPK 按消息中的主键值查询单条数据（查到后覆盖message其余字段）
-func (p *PbGormDB) FindOneByPK(message proto.Message) error {
+func (p *GormDB) FindOneByPK(message proto.Message) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -487,7 +487,7 @@ func (p *PbGormDB) FindOneByPK(message proto.Message) error {
 }
 
 // FindAllByKVIn 按单个字段的IN条件查询批量数据（WHERE key IN (...)）
-func (p *PbGormDB) FindAllByKVIn(list proto.Message, key string, values []interface{}) error {
+func (p *GormDB) FindAllByKVIn(list proto.Message, key string, values []interface{}) error {
 	if len(values) == 0 {
 		_, listField, err := resolveListTable(p.Tables, list)
 		if err != nil {
@@ -501,7 +501,7 @@ func (p *PbGormDB) FindAllByKVIn(list proto.Message, key string, values []interf
 }
 
 // FindAllByPKIn 按主键批量查询，返回列表（类似Redis MGET：不存在的主键自动跳过）
-func (p *PbGormDB) FindAllByPKIn(list proto.Message, pkValues []interface{}) error {
+func (p *GormDB) FindAllByPKIn(list proto.Message, pkValues []interface{}) error {
 	table, listField, err := resolveListTable(p.Tables, list)
 	if err != nil {
 		return err
@@ -521,7 +521,7 @@ func (p *PbGormDB) FindAllByPKIn(list proto.Message, pkValues []interface{}) err
 
 // FindOrCreate 按主键查询，不存在则用message当前值插入（玩家首次登录常用）。
 // 返回created表示是否新建了记录。
-func (p *PbGormDB) FindOrCreate(message proto.Message) (created bool, err error) {
+func (p *GormDB) FindOrCreate(message proto.Message) (created bool, err error) {
 	err = p.FindOneByPK(message)
 	if err == nil {
 		return false, nil
@@ -538,7 +538,7 @@ func (p *PbGormDB) FindOrCreate(message proto.Message) (created bool, err error)
 
 // FindOneByPKForUpdate 按主键查询并加行锁（SELECT ... FOR UPDATE），
 // 仅在Transaction内有意义，用于防止并发修改同一玩家数据
-func (p *PbGormDB) FindOneByPKForUpdate(message proto.Message) error {
+func (p *GormDB) FindOneByPKForUpdate(message proto.Message) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -565,7 +565,7 @@ func (p *PbGormDB) FindOneByPKForUpdate(message proto.Message) error {
 
 // IncrByPK 按主键对数值字段原子加减（UPDATE ... SET f = f + delta），
 // 适合货币/经验等计数器，避免"读-改-写"竞态
-func (p *PbGormDB) IncrByPK(message proto.Message, field string, delta int64) error {
+func (p *GormDB) IncrByPK(message proto.Message, field string, delta int64) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -587,7 +587,7 @@ func (p *PbGormDB) IncrByPK(message proto.Message, field string, delta int64) er
 
 // DecrByPKIfEnough 按主键原子扣减数值字段，余额不足时不扣并返回false
 // （防止负数余额，扣钱/扣道具常用）
-func (p *PbGormDB) DecrByPKIfEnough(message proto.Message, field string, delta int64) (bool, error) {
+func (p *GormDB) DecrByPKIfEnough(message proto.Message, field string, delta int64) (bool, error) {
 	if delta < 0 {
 		return false, fmt.Errorf("delta must be non-negative, got %d", delta)
 	}
@@ -616,7 +616,7 @@ func (p *PbGormDB) DecrByPKIfEnough(message proto.Message, field string, delta i
 	return result.RowsAffected > 0, nil
 }
 
-func (p *PbGormDB) FindOneByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+func (p *GormDB) FindOneByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -635,11 +635,11 @@ func (p *PbGormDB) FindOneByWhereWithArgs(message proto.Message, whereClause str
 	return scanOneProtoRow(rows, message)
 }
 
-func (p *PbGormDB) FindAll(message proto.Message) error {
+func (p *GormDB) FindAll(message proto.Message) error {
 	return p.FindAllByWhereWithArgs(message, "1=1", nil)
 }
 
-func (p *PbGormDB) FindAllByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
+func (p *GormDB) FindAllByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) error {
 	table, listField, err := resolveListTable(p.Tables, message)
 	if err != nil {
 		return err
@@ -658,7 +658,7 @@ func (p *PbGormDB) FindAllByWhereWithArgs(message proto.Message, whereClause str
 }
 
 // FindAllWithOptions 按条件查询批量数据，支持ORDER BY / LIMIT / OFFSET
-func (p *PbGormDB) FindAllWithOptions(list proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
+func (p *GormDB) FindAllWithOptions(list proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
 	table, listField, err := resolveListTable(p.Tables, list)
 	if err != nil {
 		return err
@@ -687,7 +687,7 @@ func (p *PbGormDB) FindAllWithOptions(list proto.Message, whereClause string, wh
 }
 
 // FindPage 分页查询批量数据（pageIndex从1开始）
-func (p *PbGormDB) FindPage(list proto.Message, whereClause string, whereArgs []interface{}, pageIndex, pageSize int) error {
+func (p *GormDB) FindPage(list proto.Message, whereClause string, whereArgs []interface{}, pageIndex, pageSize int) error {
 	if pageIndex < 1 || pageSize < 1 {
 		return fmt.Errorf("invalid page params: pageIndex=%d, pageSize=%d", pageIndex, pageSize)
 	}
@@ -699,7 +699,7 @@ func (p *PbGormDB) FindPage(list proto.Message, whereClause string, whereArgs []
 
 // FindOneWithOptions 按条件+排序取一条数据（如排行第一名、最新一条记录）。
 // 自动追加LIMIT 1，多行匹配时取排序后的第一条
-func (p *PbGormDB) FindOneWithOptions(message proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
+func (p *GormDB) FindOneWithOptions(message proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return err
@@ -724,7 +724,7 @@ func (p *PbGormDB) FindOneWithOptions(message proto.Message, whereClause string,
 // FindPageByCursor 游标分页（keyset pagination）：按cursorField升序返回cursorVal之后的pageSize条，
 // 深分页时性能远好于OFFSET。首页传cursorVal=nil，下一页传上一页最后一条的cursorField值。
 // cursorField应有索引且唯一（如自增id）。
-func (p *PbGormDB) FindPageByCursor(list proto.Message, whereClause string, whereArgs []interface{}, cursorField string, cursorVal interface{}, pageSize int) error {
+func (p *GormDB) FindPageByCursor(list proto.Message, whereClause string, whereArgs []interface{}, cursorField string, cursorVal interface{}, pageSize int) error {
 	if pageSize < 1 {
 		return fmt.Errorf("invalid pageSize: %d", pageSize)
 	}
@@ -750,12 +750,12 @@ func (p *PbGormDB) FindPageByCursor(list proto.Message, whereClause string, wher
 }
 
 // Count 统计全表行数（message可为行消息或列表消息）
-func (p *PbGormDB) Count(message proto.Message) (int64, error) {
+func (p *GormDB) Count(message proto.Message) (int64, error) {
 	return p.CountByWhereWithArgs(message, "", nil)
 }
 
 // CountByWhereWithArgs 按条件统计行数，message可为行消息或列表消息
-func (p *PbGormDB) CountByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) (int64, error) {
+func (p *GormDB) CountByWhereWithArgs(message proto.Message, whereClause string, whereArgs []interface{}) (int64, error) {
 	table, err := resolveAnyTable(p.Tables, message)
 	if err != nil {
 		return 0, err
@@ -769,7 +769,7 @@ func (p *PbGormDB) CountByWhereWithArgs(message proto.Message, whereClause strin
 }
 
 // Exists 判断是否存在满足条件的行，message可为行消息或列表消息
-func (p *PbGormDB) Exists(message proto.Message, whereClause string, whereArgs []interface{}) (bool, error) {
+func (p *GormDB) Exists(message proto.Message, whereClause string, whereArgs []interface{}) (bool, error) {
 	table, err := resolveAnyTable(p.Tables, message)
 	if err != nil {
 		return false, err
@@ -790,7 +790,7 @@ func (p *PbGormDB) Exists(message proto.Message, whereClause string, whereArgs [
 }
 
 // ExistsByPK 按消息中的主键值判断行是否存在
-func (p *PbGormDB) ExistsByPK(message proto.Message) (bool, error) {
+func (p *GormDB) ExistsByPK(message proto.Message) (bool, error) {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return false, err
@@ -802,13 +802,13 @@ func (p *PbGormDB) ExistsByPK(message proto.Message) (bool, error) {
 	return p.Exists(message, whereClause, whereArgs)
 }
 
-func (p *PbGormDB) Transaction(fn func(tx *PbGormDB) error) error {
+func (p *GormDB) Transaction(fn func(tx *GormDB) error) error {
 	return p.DB.Transaction(func(tx *gorm.DB) error {
 		return fn(p.WithDB(tx))
 	})
 }
 
-func (p *PbGormDB) tableForMessage(message proto.Message) (*MessageTable, error) {
+func (p *GormDB) tableForMessage(message proto.Message) (*MessageTable, error) {
 	tableName := GetTableName(message)
 	table, ok := p.Tables[tableName]
 	if !ok {

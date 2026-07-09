@@ -70,7 +70,7 @@ func main() {
 	defer db.Close()
 
 	// 2. 初始化 proto2mysql 实例
-	pbDB := proto2mysql.NewPbMysqlDB()
+	pbDB := proto2mysql.NewDB()
 	if err := pbDB.OpenDB(db, "testdb"); err != nil {
 		log.Fatalf("无法打开数据库: %v", err)
 	}

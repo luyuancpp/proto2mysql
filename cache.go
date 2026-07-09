@@ -52,13 +52,13 @@ type Cache interface {
 // 注意：按WHERE条件的更新/删除（UpdateByWhereWithArgs/DeleteByWhereWithArgs/DeleteByKV）
 // 无法定位受影响主键，不做缓存失效；缓存表请优先使用按主键的接口，
 // 或调用InvalidateCache手动失效。
-func (p *PbMysqlDB) EnableCache(cache Cache, ttl time.Duration) {
+func (p *DB) EnableCache(cache Cache, ttl time.Duration) {
 	p.cache = cache
 	p.cacheTTL = ttl
 }
 
 // CacheKey 返回message对应的缓存key（pb:<表名>:<主键值...>），供业务方手动操作缓存
-func (p *PbMysqlDB) CacheKey(message proto.Message) (string, error) {
+func (p *DB) CacheKey(message proto.Message) (string, error) {
 	table, err := p.tableForMessage(message)
 	if err != nil {
 		return "", err
@@ -67,7 +67,7 @@ func (p *PbMysqlDB) CacheKey(message proto.Message) (string, error) {
 }
 
 // InvalidateCache 手动删除一批消息对应的缓存（按WHERE批量写后可调用）
-func (p *PbMysqlDB) InvalidateCache(messages ...proto.Message) error {
+func (p *DB) InvalidateCache(messages ...proto.Message) error {
 	if !p.cacheEnabled() || len(messages) == 0 {
 		return nil
 	}
@@ -83,7 +83,7 @@ func (p *PbMysqlDB) InvalidateCache(messages ...proto.Message) error {
 	return p.cache.Del(context.Background(), keys...)
 }
 
-func (p *PbMysqlDB) cacheEnabled() bool {
+func (p *DB) cacheEnabled() bool {
 	return p.cache != nil
 }
 
@@ -105,7 +105,7 @@ func cacheKeyFor(table *MessageTable, message proto.Message) (string, error) {
 }
 
 // cacheGetProto 读缓存并反序列化到message；返回是否命中。任何错误都视为未命中（降级）。
-func (p *PbMysqlDB) cacheGetProto(table *MessageTable, message proto.Message) bool {
+func (p *DB) cacheGetProto(table *MessageTable, message proto.Message) bool {
 	key, err := cacheKeyFor(table, message)
 	if err != nil {
 		return false
@@ -127,7 +127,7 @@ func (p *PbMysqlDB) cacheGetProto(table *MessageTable, message proto.Message) bo
 }
 
 // cacheSetProto 序列化message并回填缓存（尽力而为，失败仅记日志）
-func (p *PbMysqlDB) cacheSetProto(table *MessageTable, message proto.Message) {
+func (p *DB) cacheSetProto(table *MessageTable, message proto.Message) {
 	key, err := cacheKeyFor(table, message)
 	if err != nil {
 		return
@@ -144,7 +144,7 @@ func (p *PbMysqlDB) cacheSetProto(table *MessageTable, message proto.Message) {
 }
 
 // cacheDelKeys 删除缓存key（尽力而为，失败仅记日志——存在短暂脏读风险，靠TTL兜底）
-func (p *PbMysqlDB) cacheDelKeys(keys ...string) {
+func (p *DB) cacheDelKeys(keys ...string) {
 	if !p.cacheEnabled() || len(keys) == 0 {
 		return
 	}
@@ -155,7 +155,7 @@ func (p *PbMysqlDB) cacheDelKeys(keys ...string) {
 
 // invalidateMessages 写DB成功后失效缓存：
 // 事务内先暂存key，提交成功后统一删除；非事务立即删除。
-func (p *PbMysqlDB) invalidateMessages(table *MessageTable, messages ...proto.Message) {
+func (p *DB) invalidateMessages(table *MessageTable, messages ...proto.Message) {
 	if !p.cacheEnabled() {
 		return
 	}

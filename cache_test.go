@@ -61,8 +61,8 @@ func (f *fakeCache) Del(_ context.Context, keys ...string) error {
 	return nil
 }
 
-func newCacheTestDB(cache Cache) *PbMysqlDB {
-	db := NewPbMysqlDB()
+func newCacheTestDB(cache Cache) *DB {
+	db := NewDB()
 	db.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
 	if cache != nil {
 		db.EnableCache(cache, time.Minute)
@@ -84,7 +84,7 @@ func TestCacheKeyFormat(t *testing.T) {
 	}
 
 	// 复合主键：所有主键值依次拼接
-	db2 := NewPbMysqlDB()
+	db2 := NewDB()
 	db2.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id", "group_id"))
 	db2.EnableCache(newFakeCache(), time.Minute)
 	key2, err := db2.CacheKey(&messageoption.GolangTest{Id: 1, GroupId: 2})
@@ -192,7 +192,7 @@ func TestCacheInvalidateDeferredInTx(t *testing.T) {
 	db.cacheSetProto(table, msg)
 
 	// 模拟事务上下文（只需tx非空，不执行真实SQL）
-	txDB := &PbMysqlDB{
+	txDB := &DB{
 		Tables:   db.Tables,
 		cache:    db.cache,
 		cacheTTL: db.cacheTTL,
