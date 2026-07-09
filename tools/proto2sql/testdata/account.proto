@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+import "proto_option.proto";
+
+// account 用于测试：带主键/自增/索引/唯一键选项。
+message account {
+  option(OptionTableName)        = "account";
+  option(OptionPrimaryKey)       = "id";
+  option(OptionAutoIncrementKey) = "id";
+  option(OptionIndex)            = "name";
+  option(OptionUniqueKey)        = "email";
+
+  uint64 id    = 1;
+  string name  = 2;
+  string email = 3;
+  int32  level = 4;
+  bool   vip   = 5;
+}
+
+// plain 不带表选项，应被忽略。
+message plain {
+  uint32 x = 1;
+}

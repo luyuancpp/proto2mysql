@@ -491,6 +491,41 @@ func (p *DB) CreateOrUpdateTable(m proto.Message) error {
 	return p.UpdateTableField(m)
 }
 
+// buildAlterClauses 按 proto 定义与线上字段结构(currentCols)比对，生成 ALTER TABLE 的
+// 子句列表（新增字段 ADD COLUMN / 类型不兼容 MODIFY COLUMN）。不修改传入的 currentCols
+// （内部拷贝一份），避免污染 getTableColumns 返回的字段缓存。
+func (m *MessageTable) buildAlterClauses(currentCols map[string]string) []string {
+	remaining := make(map[string]string, len(currentCols))
+	for name, colType := range currentCols {
+		remaining[name] = colType
+	}
+
+	var alterSQLs []string
+	desc := m.Descriptor
+	for i := 0; i < desc.Fields().Len(); i++ {
+		fieldDesc := desc.Fields().Get(i)
+		fieldName := string(fieldDesc.Name())
+
+		if keywordRegex.MatchString(strings.ToUpper(fieldName)) {
+			log.Printf("warning: field %s in table %s conflicts with MySQL keyword", fieldName, m.tableName)
+		}
+
+		targetType := m.getMySQLFieldType(fieldDesc)
+
+		if currentType, exists := remaining[fieldName]; exists {
+			// 字段存在但类型不兼容，修改字段类型
+			if !isTypeMatch(currentType, targetType) {
+				alterSQLs = append(alterSQLs, fmt.Sprintf("MODIFY COLUMN %s %s", escapeMySQLName(fieldName), targetType))
+			}
+			delete(remaining, fieldName) // 标记为已处理
+		} else {
+			// 字段不存在，新增字段
+			alterSQLs = append(alterSQLs, fmt.Sprintf("ADD COLUMN %s %s", escapeMySQLName(fieldName), targetType))
+		}
+	}
+	return alterSQLs
+}
+
 // UpdateTableField 同步表字段（表不存在则创建，存在则对齐字段类型）
 func (p *DB) UpdateTableField(m proto.Message) error {
 	tableName := GetTableName(m)
@@ -520,30 +555,7 @@ func (p *DB) UpdateTableField(m proto.Message) error {
 		return fmt.Errorf("获取表 %s 字段: %w", tableName, err)
 	}
 
-	var alterSQLs []string
-	desc := m.ProtoReflect().Descriptor()
-
-	for i := 0; i < desc.Fields().Len(); i++ {
-		fieldDesc := desc.Fields().Get(i)
-		fieldName := string(fieldDesc.Name())
-
-		if keywordRegex.MatchString(strings.ToUpper(fieldName)) {
-			log.Printf("warning: field %s in table %s conflicts with MySQL keyword", fieldName, tableName)
-		}
-
-		targetType := table.getMySQLFieldType(fieldDesc)
-
-		if currentType, exists := currentCols[fieldName]; exists {
-			// 字段存在但类型不兼容，修改字段类型
-			if !isTypeMatch(currentType, targetType) {
-				alterSQLs = append(alterSQLs, fmt.Sprintf("MODIFY COLUMN %s %s", escapeMySQLName(fieldName), targetType))
-			}
-			delete(currentCols, fieldName) // 标记为已处理
-		} else {
-			// 字段不存在，新增字段
-			alterSQLs = append(alterSQLs, fmt.Sprintf("ADD COLUMN %s %s", escapeMySQLName(fieldName), targetType))
-		}
-	}
+	alterSQLs := table.buildAlterClauses(currentCols)
 
 	// 执行ALTER TABLE（如果有需要修改的内容）
 	if len(alterSQLs) > 0 {
