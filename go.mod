@@ -1,6 +1,6 @@
 module github.com/luyuancpp/proto2mysql
 
-go 1.26.4
+go 1.26.5
 
 require (
 	github.com/go-sql-driver/mysql v1.8.1
