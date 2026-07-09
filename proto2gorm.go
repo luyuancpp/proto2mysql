@@ -127,6 +127,49 @@ func (p *PbGormDB) InsertOnDupUpdate(message proto.Message) error {
 	return p.Save(message)
 }
 
+// InsertIgnore 幂等插入：主键/唯一键冲突时跳过不报错。返回是否实际插入了新行
+func (p *PbGormDB) InsertIgnore(message proto.Message) (bool, error) {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return false, err
+	}
+
+	values, err := table.messageValues(message, true, true)
+	if err != nil {
+		return false, err
+	}
+
+	result := p.DB.Table(escapeMySQLName(table.tableName)).
+		Clauses(clause.OnConflict{DoNothing: true}).
+		Create(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
+}
+
+// InsertReturningID 插入并返回自增主键ID（LAST_INSERT_ID，同一连接内执行保证正确）
+func (p *PbGormDB) InsertReturningID(message proto.Message) (int64, error) {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return 0, err
+	}
+
+	sqlWithArgs, err := table.GetInsertSQLWithArgs(message)
+	if sqlWithArgs == nil || err != nil {
+		return 0, fmt.Errorf("generate insert SQL for table %s: %w", table.tableName, err)
+	}
+
+	var id int64
+	err = p.DB.Connection(func(tx *gorm.DB) error {
+		if err := tx.Exec(sqlWithArgs.Sql, sqlWithArgs.Args...).Error; err != nil {
+			return err
+		}
+		return tx.Raw("SELECT LAST_INSERT_ID()").Scan(&id).Error
+	})
+	return id, err
+}
+
 // BatchSave 批量保存（INSERT ... ON DUPLICATE KEY UPDATE，自动分批）
 func (p *PbGormDB) BatchSave(messages []proto.Message) error {
 	if len(messages) == 0 {
@@ -204,6 +247,100 @@ func (p *PbGormDB) UpdateByWhereWithArgs(message proto.Message, whereClause stri
 	}
 
 	return p.DB.Table(escapeMySQLName(table.tableName)).Where(whereClause, whereArgs...).Updates(values).Error
+}
+
+// UpdateFieldsByPK 按主键只更新指定字段（部分更新），避免Update全字段覆盖冲掉并发写入
+func (p *PbGormDB) UpdateFieldsByPK(message proto.Message, fields ...string) error {
+	if len(fields) == 0 {
+		return errors.New("no fields to update")
+	}
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	values := make(map[string]interface{}, len(fields))
+	for _, field := range fields {
+		desc, ok := table.fieldNameToDesc[field]
+		if !ok {
+			return fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, field, table.tableName)
+		}
+		val, err := pbconv.SerializeFieldAsString(message, desc)
+		if err != nil {
+			return fmt.Errorf("serialize update field %s: %w", field, err)
+		}
+		values[field] = val
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+	return p.DB.Table(escapeMySQLName(table.tableName)).Where(whereClause, whereArgs...).Updates(values).Error
+}
+
+// UpdateKVByPK 按主键设置单个字段的值（如改状态、封号）
+func (p *PbGormDB) UpdateKVByPK(message proto.Message, field string, value interface{}) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+	if _, ok := table.fieldNameToDesc[field]; !ok {
+		return fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, field, table.tableName)
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+	return p.DB.Table(escapeMySQLName(table.tableName)).Where(whereClause, whereArgs...).Update(field, value).Error
+}
+
+// UpdateIfVersion 乐观锁CAS更新：按主键更新消息中已设置的字段（versionField自动+1），
+// 仅当数据库中versionField等于message当前值时生效。返回false表示版本冲突，调用方应重读后重试
+func (p *PbGormDB) UpdateIfVersion(message proto.Message, versionField string) (bool, error) {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return false, err
+	}
+	versionDesc, ok := table.fieldNameToDesc[versionField]
+	if !ok {
+		return false, fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, versionField, table.tableName)
+	}
+
+	curVersion, err := pbconv.SerializeFieldAsString(message, versionDesc)
+	if err != nil {
+		return false, fmt.Errorf("serialize version field %s: %w", versionField, err)
+	}
+
+	values, err := table.messageValues(message, false, false)
+	if err != nil {
+		return false, err
+	}
+	delete(values, versionField)
+	for _, pk := range table.primaryKey {
+		delete(values, pk)
+	}
+	if len(values) == 0 {
+		return false, errors.New("no fields to update")
+	}
+
+	escapedVersion := escapeMySQLName(versionField)
+	values[versionField] = gorm.Expr(escapedVersion + " + 1")
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return false, err
+	}
+
+	result := p.DB.Table(escapeMySQLName(table.tableName)).
+		Where(whereClause, whereArgs...).
+		Where(escapedVersion+" = ?", curVersion).
+		Updates(values)
+	if result.Error != nil {
+		return false, result.Error
+	}
+	return result.RowsAffected > 0, nil
 }
 
 func (p *PbGormDB) Delete(message proto.Message) error {
@@ -506,6 +643,58 @@ func (p *PbGormDB) FindPage(list proto.Message, whereClause string, whereArgs []
 	})
 }
 
+// FindOneWithOptions 按条件+排序取一条数据（如排行第一名、最新一条记录）。
+// 自动追加LIMIT 1，多行匹配时取排序后的第一条
+func (p *PbGormDB) FindOneWithOptions(message proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	query := p.DB.Table(escapeMySQLName(table.tableName)).
+		Select(table.fieldsListSQL).
+		Where(normalizeWhereClause(whereClause), whereArgs...)
+	if opts.OrderBy != "" {
+		query = query.Order(opts.OrderBy)
+	}
+
+	rows, err := query.Limit(1).Rows()
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	return scanOneProtoRow(rows, message)
+}
+
+// FindPageByCursor 游标分页（keyset pagination）：按cursorField升序返回cursorVal之后的pageSize条，
+// 深分页时性能远好于OFFSET。首页传cursorVal=nil，下一页传上一页最后一条的cursorField值。
+// cursorField应有索引且唯一（如自增id）。
+func (p *PbGormDB) FindPageByCursor(list proto.Message, whereClause string, whereArgs []interface{}, cursorField string, cursorVal interface{}, pageSize int) error {
+	if pageSize < 1 {
+		return fmt.Errorf("invalid pageSize: %d", pageSize)
+	}
+	table, _, err := resolveListTable(p.Tables, list)
+	if err != nil {
+		return err
+	}
+	if _, ok := table.fieldNameToDesc[cursorField]; !ok {
+		return fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, cursorField, table.tableName)
+	}
+
+	where := normalizeWhereClause(whereClause)
+	args := append([]interface{}{}, whereArgs...)
+	if cursorVal != nil {
+		where = fmt.Sprintf("(%s) AND %s > ?", where, escapeMySQLName(cursorField))
+		args = append(args, cursorVal)
+	}
+
+	return p.FindAllWithOptions(list, where, args, QueryOptions{
+		OrderBy: escapeMySQLName(cursorField) + " ASC",
+		Limit:   pageSize,
+	})
+}
+
 // Count 统计全表行数（message可为行消息或列表消息）
 func (p *PbGormDB) Count(message proto.Message) (int64, error) {
 	return p.CountByWhereWithArgs(message, "", nil)
@@ -544,6 +733,19 @@ func (p *PbGormDB) Exists(message proto.Message, whereClause string, whereArgs [
 
 	exists := rows.Next()
 	return exists, rows.Err()
+}
+
+// ExistsByPK 按消息中的主键值判断行是否存在
+func (p *PbGormDB) ExistsByPK(message proto.Message) (bool, error) {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return false, err
+	}
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return false, err
+	}
+	return p.Exists(message, whereClause, whereArgs)
 }
 
 func (p *PbGormDB) Transaction(fn func(tx *PbGormDB) error) error {

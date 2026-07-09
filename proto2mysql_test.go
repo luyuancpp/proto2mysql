@@ -19,24 +19,24 @@ import (
 
 const integrationEnv = "PROTO2MYSQL_INTEGRATION"
 
-// GetMysqlConfig 读取db.json配置
+// GetMysqlConfig 读取testdata/db.json中的测试数据库连接配置
 func GetMysqlConfig() *mysql.Config {
-	file, err := os.Open("db.json")
+	file, err := os.Open("testdata/db.json")
 	defer func(file *os.File) {
 		if file != nil {
 			if err := file.Close(); err != nil {
-				fmt.Printf("关闭db.json失败: %v\n", err)
+				fmt.Printf("关闭testdata/db.json失败: %v\n", err)
 			}
 		}
 	}(file)
 	if err != nil {
-		fmt.Printf("打开db.json失败: %v\n", err)
+		fmt.Printf("打开testdata/db.json失败: %v\n", err)
 		return nil
 	}
 	decoder := json.NewDecoder(file)
 	jsonConfig := JsonConfig{}
 	if err := decoder.Decode(&jsonConfig); err != nil {
-		log.Printf("解析db.json失败: %v", err)
+		log.Printf("解析testdata/db.json失败: %v", err)
 		return nil
 	}
 	return NewMysqlConfig(jsonConfig)
@@ -55,7 +55,7 @@ func mustOpenTestDB(t *testing.T, pbMySqlDB *PbMysqlDB) *sql.DB {
 
 	mysqlConfig := GetMysqlConfig()
 	if mysqlConfig == nil {
-		t.Fatal("获取MySQL配置失败，请检查db.json文件")
+		t.Fatal("获取MySQL配置失败，请检查testdata/db.json文件")
 	}
 
 	conn, err := mysql.NewConnector(mysqlConfig)
@@ -1912,4 +1912,222 @@ func TestGameServerInterfaces(t *testing.T) {
 	})
 
 	t.Log("游戏服务器接口测试通过")
+}
+
+// TestExtendedCRUDValidation 单元测试：新增增删改查接口的参数校验（无需数据库）
+func TestExtendedCRUDValidation(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	pbMySqlDB.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
+	msg := &messageoption.GolangTest{Id: 1}
+
+	if err := pbMySqlDB.UpdateFieldsByPK(msg); err == nil {
+		t.Error("UpdateFieldsByPK不传字段应报错")
+	}
+	if err := pbMySqlDB.UpdateFieldsByPK(msg, "no_such_field"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+		t.Errorf("UpdateFieldsByPK未知字段应返回ErrFieldNotFound，实际: %v", err)
+	}
+	if err := pbMySqlDB.UpdateKVByPK(msg, "no_such_field", 1); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+		t.Errorf("UpdateKVByPK未知字段应返回ErrFieldNotFound，实际: %v", err)
+	}
+	if _, err := pbMySqlDB.UpdateIfVersion(msg, "no_such_field"); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+		t.Errorf("UpdateIfVersion未知版本字段应返回ErrFieldNotFound，实际: %v", err)
+	}
+	if _, err := pbMySqlDB.UpdateIfVersion(&messageoption.GolangTest{Id: 1}, "group_id"); err == nil {
+		t.Error("UpdateIfVersion无可更新字段应报错")
+	}
+
+	var list messageoption.GolangTestList
+	if err := pbMySqlDB.FindPageByCursor(&list, "", nil, "id", nil, 0); err == nil {
+		t.Error("FindPageByCursor pageSize<1应报错")
+	}
+	if err := pbMySqlDB.FindPageByCursor(&list, "", nil, "no_such_field", nil, 10); err == nil || !strings.Contains(err.Error(), ErrFieldNotFound.Error()) {
+		t.Errorf("FindPageByCursor未知游标字段应返回ErrFieldNotFound，实际: %v", err)
+	}
+}
+
+// TestExtendedCRUDInterfaces 集成测试：InsertIgnore/InsertReturningID/UpdateFieldsByPK/
+// UpdateKVByPK/UpdateIfVersion/ExistsByPK/FindOneWithOptions/FindPageByCursor
+func TestExtendedCRUDInterfaces(t *testing.T) {
+	pbMySqlDB := NewPbMysqlDB()
+	testTable := &messageoption.GolangTest{}
+	pbMySqlDB.RegisterTable(testTable, WithPrimaryKey("id"), WithAutoIncrementKey("id"))
+
+	db := mustOpenTestDB(t, pbMySqlDB)
+	defer closeTestDB(t, db)
+
+	if _, err := db.Exec(pbMySqlDB.GetCreateTableSQL(testTable)); err != nil {
+		t.Fatalf("预处理表结构失败: %v", err)
+	}
+	if _, err := db.Exec("DELETE FROM " + testTableSQLName(testTable) + " WHERE player_id=9900"); err != nil {
+		t.Logf("清理旧数据失败: %v", err)
+	}
+
+	// 1. InsertIgnore：首次插入成功，重复插入跳过
+	t.Run("InsertIgnore", func(t *testing.T) {
+		row := &messageoption.GolangTest{Id: 9901, PlayerId: 9900, Ip: "10.9.0.1", Port: 1}
+		inserted, err := pbMySqlDB.InsertIgnore(row)
+		if err != nil {
+			t.Fatalf("InsertIgnore失败: %v", err)
+		}
+		if !inserted {
+			t.Error("首次InsertIgnore应插入新行")
+		}
+
+		dup := &messageoption.GolangTest{Id: 9901, PlayerId: 9900, Ip: "10.9.0.999", Port: 999}
+		inserted, err = pbMySqlDB.InsertIgnore(dup)
+		if err != nil {
+			t.Fatalf("重复InsertIgnore失败: %v", err)
+		}
+		if inserted {
+			t.Error("重复InsertIgnore应跳过")
+		}
+
+		// 原数据应未被覆盖
+		got := &messageoption.GolangTest{Id: 9901}
+		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+			t.Fatalf("回查失败: %v", err)
+		}
+		if got.Port != 1 {
+			t.Errorf("重复InsertIgnore不应覆盖原数据: port=%d", got.Port)
+		}
+	})
+
+	// 2. InsertReturningID：自增主键回填
+	t.Run("InsertReturningID", func(t *testing.T) {
+		id, err := pbMySqlDB.InsertReturningID(&messageoption.GolangTest{PlayerId: 9900, Ip: "10.9.0.2"})
+		if err != nil {
+			t.Fatalf("InsertReturningID失败: %v", err)
+		}
+		if id <= 0 {
+			t.Fatalf("预期返回自增ID>0，实际%d", id)
+		}
+		if ok, err := pbMySqlDB.ExistsByPK(&messageoption.GolangTest{Id: uint32(id)}); err != nil || !ok {
+			t.Errorf("按返回ID查询应存在: ok=%v, err=%v", ok, err)
+		}
+	})
+
+	// 3. UpdateFieldsByPK：部分更新，不动其他字段
+	t.Run("UpdateFieldsByPK", func(t *testing.T) {
+		row := &messageoption.GolangTest{Id: 9901, Ip: "10.9.9.9", Port: 777}
+		if err := pbMySqlDB.UpdateFieldsByPK(row, "ip"); err != nil {
+			t.Fatalf("UpdateFieldsByPK失败: %v", err)
+		}
+
+		got := &messageoption.GolangTest{Id: 9901}
+		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+			t.Fatalf("回查失败: %v", err)
+		}
+		if got.Ip != "10.9.9.9" {
+			t.Errorf("ip应已更新: %s", got.Ip)
+		}
+		if got.Port != 1 {
+			t.Errorf("port不在更新列表中不应改变: %d", got.Port)
+		}
+	})
+
+	// 4. UpdateKVByPK：单字段设值
+	t.Run("UpdateKVByPK", func(t *testing.T) {
+		if err := pbMySqlDB.UpdateKVByPK(&messageoption.GolangTest{Id: 9901}, "port", 42); err != nil {
+			t.Fatalf("UpdateKVByPK失败: %v", err)
+		}
+		got := &messageoption.GolangTest{Id: 9901}
+		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+			t.Fatalf("回查失败: %v", err)
+		}
+		if got.Port != 42 {
+			t.Errorf("port应为42，实际%d", got.Port)
+		}
+	})
+
+	// 5. UpdateIfVersion：乐观锁CAS（以group_id为版本字段）
+	t.Run("UpdateIfVersion", func(t *testing.T) {
+		// 当前group_id=0；用正确版本更新成功，group_id自动+1
+		row := &messageoption.GolangTest{Id: 9901, Ip: "10.9.1.1", GroupId: 0}
+		ok, err := pbMySqlDB.UpdateIfVersion(row, "group_id")
+		if err != nil {
+			t.Fatalf("UpdateIfVersion失败: %v", err)
+		}
+		if !ok {
+			t.Fatal("版本匹配时应更新成功")
+		}
+
+		got := &messageoption.GolangTest{Id: 9901}
+		if err := pbMySqlDB.FindOneByPK(got); err != nil {
+			t.Fatalf("回查失败: %v", err)
+		}
+		if got.GroupId != 1 {
+			t.Errorf("版本应自动+1: group_id=%d", got.GroupId)
+		}
+		if got.Ip != "10.9.1.1" {
+			t.Errorf("ip应已更新: %s", got.Ip)
+		}
+
+		// 用过期版本（0）再更新应失败
+		stale := &messageoption.GolangTest{Id: 9901, Ip: "10.9.2.2", GroupId: 0}
+		ok, err = pbMySqlDB.UpdateIfVersion(stale, "group_id")
+		if err != nil {
+			t.Fatalf("UpdateIfVersion失败: %v", err)
+		}
+		if ok {
+			t.Error("版本冲突时应返回false")
+		}
+	})
+
+	// 6. ExistsByPK
+	t.Run("ExistsByPK", func(t *testing.T) {
+		ok, err := pbMySqlDB.ExistsByPK(&messageoption.GolangTest{Id: 9901})
+		if err != nil || !ok {
+			t.Errorf("存在的主键应返回true: ok=%v, err=%v", ok, err)
+		}
+		ok, err = pbMySqlDB.ExistsByPK(&messageoption.GolangTest{Id: 99999999})
+		if err != nil || ok {
+			t.Errorf("不存在的主键应返回false: ok=%v, err=%v", ok, err)
+		}
+	})
+
+	// 7. FindOneWithOptions：排序取一条
+	t.Run("FindOneWithOptions", func(t *testing.T) {
+		// 再插入几条，用于排序
+		batch := []proto.Message{
+			&messageoption.GolangTest{Id: 9903, PlayerId: 9900, Port: 100},
+			&messageoption.GolangTest{Id: 9904, PlayerId: 9900, Port: 300},
+			&messageoption.GolangTest{Id: 9905, PlayerId: 9900, Port: 200},
+		}
+		if err := pbMySqlDB.BatchSave(batch); err != nil {
+			t.Fatalf("准备数据失败: %v", err)
+		}
+
+		top := &messageoption.GolangTest{}
+		err := pbMySqlDB.FindOneWithOptions(top, "player_id = ?", []interface{}{9900}, QueryOptions{OrderBy: "port DESC"})
+		if err != nil {
+			t.Fatalf("FindOneWithOptions失败: %v", err)
+		}
+		if top.Id != 9904 || top.Port != 300 {
+			t.Errorf("应返回port最大的一条: id=%d, port=%d", top.Id, top.Port)
+		}
+	})
+
+	// 8. FindPageByCursor：游标分页
+	t.Run("FindPageByCursor", func(t *testing.T) {
+		var page1 messageoption.GolangTestList
+		if err := pbMySqlDB.FindPageByCursor(&page1, "player_id = ?", []interface{}{9900}, "id", nil, 3); err != nil {
+			t.Fatalf("首页查询失败: %v", err)
+		}
+		if len(page1.TestList) != 3 {
+			t.Fatalf("首页预期3条，实际%d条", len(page1.TestList))
+		}
+
+		cursor := page1.TestList[len(page1.TestList)-1].Id
+		var page2 messageoption.GolangTestList
+		if err := pbMySqlDB.FindPageByCursor(&page2, "player_id = ?", []interface{}{9900}, "id", cursor, 3); err != nil {
+			t.Fatalf("次页查询失败: %v", err)
+		}
+		for _, item := range page2.TestList {
+			if item.Id <= cursor {
+				t.Errorf("次页数据应全部大于游标%d: id=%d", cursor, item.Id)
+			}
+		}
+	})
+
+	t.Log("扩展增删改查接口测试通过")
 }

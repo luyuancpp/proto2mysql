@@ -44,7 +44,8 @@ type Cache interface {
 // EnableCache 启用cache-aside缓存（按主键的单行读写生效）。
 // 语义：
 //   - 读（FindOneByPK/FindOrCreate命中路径）：先查缓存，未命中读DB后回填；
-//   - 写（Save/Update/Delete/IncrByPK等按主键操作）：先写DB，成功后删缓存；
+//   - 写（Save/Update/UpdateFieldsByPK/UpdateKVByPK/UpdateIfVersion/Delete/IncrByPK等
+//     按主键操作）：先写DB，成功后删缓存；
 //   - 事务（RunInTransaction）：删缓存延迟到提交成功之后，避免回滚后缓存脏删；
 //   - 降级：缓存Get/Set/Del出错仅记录日志，不影响DB结果（Redis弱依赖）。
 //

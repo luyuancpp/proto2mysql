@@ -717,6 +717,50 @@ func (p *PbMysqlDB) BatchInsert(messages []proto.Message) error {
 	return nil
 }
 
+// InsertIgnore 幂等插入（INSERT IGNORE）：主键/唯一键冲突时跳过不报错，
+// 补数据/防重复发奖常用。返回是否实际插入了新行。
+func (p *PbMysqlDB) InsertIgnore(message proto.Message) (bool, error) {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return false, err
+	}
+
+	insertSQL, err := table.GetInsertSQLWithArgs(message)
+	if insertSQL == nil || err != nil {
+		return false, fmt.Errorf("generate insert SQL for table %s: %w", table.tableName, err)
+	}
+
+	sqlStmt := "INSERT IGNORE" + strings.TrimPrefix(insertSQL.Sql, "INSERT")
+	result, err := p.conn().Exec(sqlStmt, insertSQL.Args...)
+	if err != nil {
+		return false, fmt.Errorf("exec insert ignore for table %s: %w", table.tableName, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	return affected > 0, nil
+}
+
+// InsertReturningID 插入并返回自增主键ID（LAST_INSERT_ID），自增主键表建议用此接口
+func (p *PbMysqlDB) InsertReturningID(message proto.Message) (int64, error) {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return 0, err
+	}
+
+	sqlWithArgs, err := table.GetInsertSQLWithArgs(message)
+	if sqlWithArgs == nil || err != nil {
+		return 0, fmt.Errorf("generate insert SQL for table %s: %w", table.tableName, err)
+	}
+
+	result, err := p.conn().Exec(sqlWithArgs.Sql, sqlWithArgs.Args...)
+	if err != nil {
+		return 0, fmt.Errorf("exec insert for table %s: %w", table.tableName, err)
+	}
+	return result.LastInsertId()
+}
+
 // InsertOnDupUpdate 执行参数化的INSERT...ON DUPLICATE KEY UPDATE操作（直接用DB，无Tx）
 func (p *PbMysqlDB) InsertOnDupUpdate(message proto.Message) error {
 	tableName := GetTableName(message)
@@ -905,6 +949,140 @@ func (p *PbMysqlDB) UpdateByWhereWithArgs(message proto.Message, whereClause str
 		return fmt.Errorf("exec update by where for table %s: %w", table.tableName, err)
 	}
 	return nil
+}
+
+// UpdateFieldsByPK 按主键只更新指定字段（部分更新），避免Update全字段覆盖
+// 冲掉其他地方的并发写入（如改名操作把别处刚加的金币覆盖回去）
+func (p *PbMysqlDB) UpdateFieldsByPK(message proto.Message, fields ...string) error {
+	if len(fields) == 0 {
+		return errors.New("no fields to update")
+	}
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	clauses := make([]string, 0, len(fields))
+	args := make([]interface{}, 0, len(fields))
+	for _, field := range fields {
+		desc, ok := table.fieldNameToDesc[field]
+		if !ok {
+			return fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, field, table.tableName)
+		}
+		val, err := pbconv.SerializeFieldAsString(message, desc)
+		if err != nil {
+			return fmt.Errorf("serialize update field %s: %w", field, err)
+		}
+		clauses = append(clauses, escapeMySQLName(field)+" = ?")
+		args = append(args, val)
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+
+	sqlStmt := fmt.Sprintf("UPDATE %s SET %s WHERE %s",
+		escapeMySQLName(table.tableName), strings.Join(clauses, ", "), whereClause)
+	if _, err := p.conn().Exec(sqlStmt, append(args, whereArgs...)...); err != nil {
+		return fmt.Errorf("exec update fields for table %s: %w", table.tableName, err)
+	}
+	p.invalidateMessages(table, message)
+	return nil
+}
+
+// UpdateKVByPK 按主键设置单个字段的值（如改状态、封号）
+func (p *PbMysqlDB) UpdateKVByPK(message proto.Message, field string, value interface{}) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+	if _, ok := table.fieldNameToDesc[field]; !ok {
+		return fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, field, table.tableName)
+	}
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return err
+	}
+
+	sqlStmt := fmt.Sprintf("UPDATE %s SET %s = ? WHERE %s",
+		escapeMySQLName(table.tableName), escapeMySQLName(field), whereClause)
+	if _, err := p.conn().Exec(sqlStmt, append([]interface{}{value}, whereArgs...)...); err != nil {
+		return fmt.Errorf("exec update kv for table %s: %w", table.tableName, err)
+	}
+	p.invalidateMessages(table, message)
+	return nil
+}
+
+// UpdateIfVersion 乐观锁CAS更新：按主键更新消息中已设置的字段（versionField自动+1），
+// 仅当数据库中versionField等于message当前值时生效。返回false表示版本冲突（被其他
+// 写入抢先），调用方应重读后重试。不想用行锁时的轻量并发控制。
+func (p *PbMysqlDB) UpdateIfVersion(message proto.Message, versionField string) (bool, error) {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return false, err
+	}
+	versionDesc, ok := table.fieldNameToDesc[versionField]
+	if !ok {
+		return false, fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, versionField, table.tableName)
+	}
+
+	curVersion, err := pbconv.SerializeFieldAsString(message, versionDesc)
+	if err != nil {
+		return false, fmt.Errorf("serialize version field %s: %w", versionField, err)
+	}
+
+	pkSet := make(map[string]bool, len(table.primaryKey))
+	for _, pk := range table.primaryKey {
+		pkSet[pk] = true
+	}
+
+	reflection := message.ProtoReflect()
+	var clauses []string
+	var args []interface{}
+	for i := 0; i < table.Descriptor.Fields().Len(); i++ {
+		field := table.Descriptor.Fields().Get(i)
+		name := string(field.Name())
+		if name == versionField || pkSet[name] || !reflection.Has(field) {
+			continue
+		}
+		val, err := pbconv.SerializeFieldAsString(message, field)
+		if err != nil {
+			return false, fmt.Errorf("serialize update field %s: %w", name, err)
+		}
+		clauses = append(clauses, escapeMySQLName(name)+" = ?")
+		args = append(args, val)
+	}
+	if len(clauses) == 0 {
+		return false, errors.New("no fields to update")
+	}
+
+	escapedVersion := escapeMySQLName(versionField)
+	clauses = append(clauses, fmt.Sprintf("%s = %s + 1", escapedVersion, escapedVersion))
+
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return false, err
+	}
+
+	sqlStmt := fmt.Sprintf("UPDATE %s SET %s WHERE %s AND %s = ?",
+		escapeMySQLName(table.tableName), strings.Join(clauses, ", "), whereClause, escapedVersion)
+	args = append(args, whereArgs...)
+	args = append(args, curVersion)
+
+	result, err := p.conn().Exec(sqlStmt, args...)
+	if err != nil {
+		return false, fmt.Errorf("exec update if version for table %s: %w", table.tableName, err)
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if affected > 0 {
+		p.invalidateMessages(table, message)
+	}
+	return affected > 0, nil
 }
 
 // GetReplaceSQLWithArgs 生成参数化的REPLACE语句
@@ -1408,6 +1586,57 @@ func (p *PbMysqlDB) FindPage(list proto.Message, whereClause string, whereArgs [
 	})
 }
 
+// FindOneWithOptions 按条件+排序取一条数据（如排行第一名、最新一条记录）。
+// 自动追加LIMIT 1，多行匹配时取排序后的第一条
+func (p *PbMysqlDB) FindOneWithOptions(message proto.Message, whereClause string, whereArgs []interface{}, opts QueryOptions) error {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return err
+	}
+
+	opts.Limit = 1
+	opts.Offset = 0
+	sqlStmt := fmt.Sprintf("%s WHERE %s%s;", table.selectFieldsSQL, normalizeWhereClause(whereClause), opts.sqlSuffix())
+	rows, err := p.conn().Query(sqlStmt, whereArgs...)
+	if err != nil {
+		return fmt.Errorf("exec select one for table %s: %w", table.tableName, err)
+	}
+	defer rows.Close()
+
+	if err := scanOneProtoRow(rows, message); err != nil {
+		return fmt.Errorf("table %s: %w", table.tableName, err)
+	}
+	return nil
+}
+
+// FindPageByCursor 游标分页（keyset pagination）：按cursorField升序返回cursorVal之后的pageSize条，
+// 深分页时性能远好于OFFSET，适合流水/邮件列表。首页传cursorVal=nil，
+// 下一页传上一页最后一条的cursorField值。cursorField应有索引且唯一（如自增id）。
+func (p *PbMysqlDB) FindPageByCursor(list proto.Message, whereClause string, whereArgs []interface{}, cursorField string, cursorVal interface{}, pageSize int) error {
+	if pageSize < 1 {
+		return fmt.Errorf("invalid pageSize: %d", pageSize)
+	}
+	table, _, err := resolveListTable(p.Tables, list)
+	if err != nil {
+		return err
+	}
+	if _, ok := table.fieldNameToDesc[cursorField]; !ok {
+		return fmt.Errorf("%w: %s in table %s", ErrFieldNotFound, cursorField, table.tableName)
+	}
+
+	where := normalizeWhereClause(whereClause)
+	args := append([]interface{}{}, whereArgs...)
+	if cursorVal != nil {
+		where = fmt.Sprintf("(%s) AND %s > ?", where, escapeMySQLName(cursorField))
+		args = append(args, cursorVal)
+	}
+
+	return p.FindAllWithOptions(list, where, args, QueryOptions{
+		OrderBy: escapeMySQLName(cursorField) + " ASC",
+		Limit:   pageSize,
+	})
+}
+
 // Count 统计全表行数（message可为行消息或列表消息）
 func (p *PbMysqlDB) Count(message proto.Message) (int64, error) {
 	return p.CountByWhereWithArgs(message, "", nil)
@@ -1447,6 +1676,19 @@ func (p *PbMysqlDB) Exists(message proto.Message, whereClause string, whereArgs 
 		return false, fmt.Errorf("exists check for table %s: %w", table.tableName, err)
 	}
 	return true, nil
+}
+
+// ExistsByPK 按消息中的主键值判断行是否存在
+func (p *PbMysqlDB) ExistsByPK(message proto.Message) (bool, error) {
+	table, err := p.tableForMessage(message)
+	if err != nil {
+		return false, err
+	}
+	whereClause, whereArgs, err := table.primaryKeyWhere(message)
+	if err != nil {
+		return false, err
+	}
+	return p.Exists(message, whereClause, whereArgs)
 }
 
 // Transaction 在事务中执行fn：fn返回错误时回滚，否则提交（需要原生*sql.Tx时使用，
