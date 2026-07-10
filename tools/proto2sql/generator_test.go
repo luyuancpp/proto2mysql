@@ -61,3 +61,17 @@ func TestGenerateDrop(t *testing.T) {
 		t.Errorf("expected DROP prefix, got:\n%s", tables[0].SQL)
 	}
 }
+
+func TestGenerateRequireDBOption(t *testing.T) {
+	tables, err := Generate(context.Background(), Config{
+		ProtoFiles:      []string{"testdata/account.proto", "testdata/unmarked.proto"},
+		ImportPaths:     []string{optionProtoDir()},
+		RequireDBOption: true,
+	})
+	if err != nil {
+		t.Fatalf("Generate: %v", err)
+	}
+	if len(tables) != 1 || tables[0].Name != "account" {
+		t.Fatalf("expected only db-marked account table, got %+v", tables)
+	}
+}

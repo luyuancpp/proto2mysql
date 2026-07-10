@@ -2,12 +2,12 @@
 //
 // 用法示例：
 //
-//	proto2sql -proto game.proto -I . -I /path/to/protooption -out ./sql
+//	proto2sql -proto game.proto -I . -I /path/to/proto2mysql/proto -out ./sql
 //	proto2sql -proto a.proto,b.proto -out ./sql -single schema.sql -drop
 //
 // 说明：
 //   - -proto  要编译的 .proto 文件（逗号分隔或重复传入）；其所在目录会自动加入搜索路径。
-//   - -I      额外的 import 搜索目录（用于定位被 import 的 proto_option.proto / descriptor.proto 等）。
+//   - -I      额外的 import 搜索目录（用于定位被 import 的 proto 文件和 descriptor.proto 等）。
 //   - -out    输出目录（默认当前目录，不存在会创建）。
 //   - -single 若指定，则所有表合并写入该文件；否则每张表一个 <表名>.sql。
 //   - -drop   在每条 CREATE TABLE 前加 DROP TABLE IF EXISTS。

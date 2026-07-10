@@ -1,12 +1,12 @@
-// 仅供本仓库测试使用的示例消息，等价于原先依赖的
-// github.com/luyuancpp/protooption 中的 golang_test / player，
-// 但改用本仓库自带的 proto/proto2mysql_option.proto 选项定义，
-// 以便测试不再依赖外部 protooption 模块。
+// 仅供本仓库测试使用的示例消息，覆盖表注册、缓存和 CRUD 等场景。
+// 建表元数据使用 proto/proto2mysql_option.proto 中的选项定义。
 syntax = "proto3";
 
 import "proto2mysql_option.proto";
 
 option go_package = "github.com/luyuancpp/proto2mysql/internal/testpb;testpb";
+
+option (proto2mysql.db) = true;
 
 message player {
   uint64 player_id = 1;

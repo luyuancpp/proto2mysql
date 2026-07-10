@@ -23,10 +23,14 @@ import (
 type Config struct {
 	// ProtoFiles 要编译的 .proto 文件（可为相对/绝对路径；其所在目录会自动加入 import 搜索路径）。
 	ProtoFiles []string
-	// ImportPaths 额外的 import 搜索目录（用于定位 proto_option.proto / descriptor.proto 等被 import 的文件）。
+	// ImportPaths 额外的 import 搜索目录（用于定位被 import 的 proto 文件和 descriptor.proto 等）。
 	ImportPaths []string
 	// Drop 为 true 时，在每条 CREATE TABLE 前加 DROP TABLE IF EXISTS。
 	Drop bool
+	// RequireDBOption 为 true 时，只处理声明了文件级选项 option (proto2mysql.db) = true; 的
+	// .proto 文件（与运行时 DB.RegisterAllTables 的筛选规则一致）；未声明的文件整体跳过。
+	// 默认 false：处理全部输入文件里带 table_name 的消息。
+	RequireDBOption bool
 }
 
 // Table 单张表的生成结果。
@@ -35,7 +39,8 @@ type Table struct {
 	SQL  string // 该表的建表 SQL（含末尾分号；Drop 开启时含前置 DROP 语句）
 }
 
-// Generate 编译 cfg.ProtoFiles，为每个带 OptionTableName 的 message 生成建表 SQL，按表名排序返回。
+// Generate 编译 cfg.ProtoFiles，为每个带 table_name 选项的 message 生成建表 SQL，按表名排序返回。
+// 若 cfg.RequireDBOption 为 true，则只处理声明了文件级 option (proto2mysql.db) = true; 的文件。
 func Generate(ctx context.Context, cfg Config) ([]Table, error) {
 	filenames, importPaths := resolveInputs(cfg.ProtoFiles, cfg.ImportPaths)
 
@@ -54,6 +59,10 @@ func Generate(ctx context.Context, cfg Config) ([]Table, error) {
 	var tables []Table
 	seen := make(map[string]bool)
 	for _, f := range files {
+		// 与运行时一致：开启 RequireDBOption 时，只扫描声明了 db 文件选项的文件。
+		if cfg.RequireDBOption && !proto2mysql.FileHasDBOption(f) {
+			continue
+		}
 		collectTables(f.Messages(), cfg.Drop, seen, &tables)
 	}
 

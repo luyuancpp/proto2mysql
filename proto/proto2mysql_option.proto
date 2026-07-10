@@ -5,6 +5,8 @@
 //
 //	import "proto2mysql_option.proto";
 //
+//	option (proto2mysql.db) = true;   // 文件级标识：本文件用于 proto2mysql 建表
+//
 //	message user {
 //	  option (proto2mysql.table_name)         = "user";
 //	  option (proto2mysql.primary_key)        = "id";           // 逗号分隔 = 联合主键
@@ -17,12 +19,6 @@
 //	  string display_name = 3 [(proto2mysql.nullable) = true];  // 该列允许为 NULL
 //	  uint64 last_login = 4;
 //	}
-//
-// 兼容性说明：message 级选项的扩展字段号与 github.com/luyuancpp/protooption 的
-// OptionTableName(500001)/OptionPrimaryKey(500002)/OptionAutoIncrementKey(500006)/
-// OptionIndex(500011)/OptionUniqueKey(500012) 完全一致，运行时按字段号反射读取，
-// 两套定义任选其一即可。注意：同一个二进制里不要同时链接两套定义的生成代码
-// （扩展字段号相同会导致 protoregistry 注册冲突）。
 syntax = "proto3";
 
 package proto2mysql;
@@ -30,6 +26,12 @@ package proto2mysql;
 import "google/protobuf/descriptor.proto";
 
 option go_package = "github.com/luyuancpp/proto2mysql/pbopt;pbopt";
+
+extend google.protobuf.FileOptions {
+  // 标记本 .proto 文件用于 proto2mysql 建表，纯用途声明。
+  // 注意：是否建表只取决于各 message 是否声明了 table_name；本选项不影响建表行为。
+  optional bool db = 500000;
+}
 
 extend google.protobuf.MessageOptions {
   // 表名（必填：声明了才视为一张表）

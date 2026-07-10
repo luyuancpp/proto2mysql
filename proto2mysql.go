@@ -15,8 +15,10 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/luyuancpp/proto2mysql/pbconv"
+	"google.golang.org/protobuf/encoding/protowire"
 	"google.golang.org/protobuf/proto"
 	"google.golang.org/protobuf/reflect/protoreflect"
+	"google.golang.org/protobuf/reflect/protoregistry"
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
@@ -382,7 +384,7 @@ func (m *MessageTable) GetCreateTableSQL() string {
 
 		fieldType := m.getMySQLFieldType(field)
 
-		fields = append(fields, fmt.Sprintf("  %s %s", escapedName, fieldType))
+		fields = append(fields, fmt.Sprintf("  %s %s%s", escapedName, fieldType, columnComment(field.Number())))
 	}
 
 	if len(m.primaryKey) > 0 {
@@ -429,6 +431,34 @@ func escapeMySQLComment(comment string) string {
 	return strings.ReplaceAll(strings.ReplaceAll(comment, "'", "\\'"), "\n", " ")
 }
 
+// columnCommentPrefix 列注释中记录 proto 字段号的前缀，形如 COMMENT 'pb:3'。
+// 迁移时据此按字段号识别列，从而支持字段改名（CHANGE COLUMN）并保留原有数据。
+const columnCommentPrefix = "pb:"
+
+// columnComment 生成带 proto 字段号的列注释片段（含前导空格），如 " COMMENT 'pb:3'"。
+func columnComment(num protoreflect.FieldNumber) string {
+	return fmt.Sprintf(" COMMENT '%s%d'", columnCommentPrefix, num)
+}
+
+// parseFieldNumFromComment 从列注释解析 proto 字段号；无 pb:N 前缀或非法时返回 (0,false)。
+func parseFieldNumFromComment(comment string) (protoreflect.FieldNumber, bool) {
+	if !strings.HasPrefix(comment, columnCommentPrefix) {
+		return 0, false
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(comment, columnCommentPrefix))
+	if err != nil || n < int(protowire.MinValidNumber) || n > int(protowire.MaxValidNumber) {
+		return 0, false
+	}
+	return protoreflect.FieldNumber(n), true
+}
+
+// columnMeta 线上单列的元信息：类型 + 从注释解析出的 proto 字段号（0 表示无字段号注释，
+// 通常是旧版本创建的表）。
+type columnMeta struct {
+	colType  string
+	fieldNum protoreflect.FieldNumber
+}
+
 // getTableColumns 获取表当前字段结构信息
 func (p *DB) getTableColumns(tableName string) (map[string]string, error) {
 	table, ok := p.Tables[tableName]
@@ -473,6 +503,45 @@ func (p *DB) getTableColumns(tableName string) (map[string]string, error) {
 	return columns, nil
 }
 
+// getTableColumnMeta 读取线上表每列的类型与 proto 字段号注释（COLUMN_COMMENT 中的 pb:N）。
+// 用于迁移时按字段号识别列以支持改名保留数据。不使用 cachedColumns（迁移不频繁，且需要
+// 注释信息），避免与 getTableColumns 的类型缓存混淆。
+func (p *DB) getTableColumnMeta(tableName string) (map[string]columnMeta, error) {
+	table, ok := p.Tables[tableName]
+	if !ok {
+		return nil, fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
+	}
+
+	query := `
+		SELECT COLUMN_NAME, COLUMN_TYPE, COLUMN_COMMENT
+		FROM INFORMATION_SCHEMA.COLUMNS
+		WHERE TABLE_SCHEMA = ? AND TABLE_NAME = ?
+	`
+	rows, err := p.DB.QueryContext(p.context(), query, p.DBName, table.tableName)
+	if err != nil {
+		return nil, fmt.Errorf("query column meta for table %s: %w", table.tableName, err)
+	}
+	defer rows.Close()
+
+	metas := make(map[string]columnMeta)
+	for rows.Next() {
+		var colName, colType, colComment string
+		if err := rows.Scan(&colName, &colType, &colComment); err != nil {
+			return nil, fmt.Errorf("scan column meta for table %s: %w", tableName, err)
+		}
+		meta := columnMeta{colType: colType}
+		if num, ok := parseFieldNumFromComment(colComment); ok {
+			meta.fieldNum = num
+		}
+		metas[colName] = meta
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows error for table %s column meta: %w", tableName, err)
+	}
+
+	return metas, nil
+}
+
 // clearColumnCache 清除表字段缓存
 func (p *DB) clearColumnCache(tableName string) {
 	if table, ok := p.Tables[tableName]; ok {
@@ -492,12 +561,22 @@ func (p *DB) CreateOrUpdateTable(m proto.Message) error {
 }
 
 // buildAlterClauses 按 proto 定义与线上字段结构(currentCols)比对，生成 ALTER TABLE 的
-// 子句列表（新增字段 ADD COLUMN / 类型不兼容 MODIFY COLUMN）。不修改传入的 currentCols
-// （内部拷贝一份），避免污染 getTableColumns 返回的字段缓存。
-func (m *MessageTable) buildAlterClauses(currentCols map[string]string) []string {
-	remaining := make(map[string]string, len(currentCols))
-	for name, colType := range currentCols {
-		remaining[name] = colType
+// 子句列表。匹配优先级：
+//  1. 列名精确匹配：类型不兼容或缺少字段号注释时 MODIFY COLUMN（顺带回填注释）；
+//  2. 字段号匹配（列名不同但注释里的 proto 字段号与当前字段一致）：CHANGE COLUMN 改名并对齐
+//     类型，原有数据保留（这是"根据 Field id 改名字/类型"的核心）；
+//  3. 都无匹配：ADD COLUMN 新增字段。
+//
+// 所有生成的列均带 COMMENT 'pb:N'，以便后续迁移继续按字段号识别列。
+// 不修改传入的 currentCols（内部拷贝一份）。
+func (m *MessageTable) buildAlterClauses(currentCols map[string]columnMeta) []string {
+	remaining := make(map[string]columnMeta, len(currentCols))
+	byFieldNum := make(map[protoreflect.FieldNumber]string, len(currentCols))
+	for name, meta := range currentCols {
+		remaining[name] = meta
+		if meta.fieldNum != 0 {
+			byFieldNum[meta.fieldNum] = name
+		}
 	}
 
 	var alterSQLs []string
@@ -510,18 +589,32 @@ func (m *MessageTable) buildAlterClauses(currentCols map[string]string) []string
 			log.Printf("warning: field %s in table %s conflicts with MySQL keyword", fieldName, m.tableName)
 		}
 
+		fieldNum := fieldDesc.Number()
 		targetType := m.getMySQLFieldType(fieldDesc)
+		comment := columnComment(fieldNum)
 
-		if currentType, exists := remaining[fieldName]; exists {
-			// 字段存在但类型不兼容，修改字段类型
-			if !isTypeMatch(currentType, targetType) {
-				alterSQLs = append(alterSQLs, fmt.Sprintf("MODIFY COLUMN %s %s", escapeMySQLName(fieldName), targetType))
+		// 1) 列名精确匹配
+		if meta, exists := remaining[fieldName]; exists {
+			// 类型不兼容，或旧表该列尚无字段号注释时，MODIFY 顺带回填注释
+			if !isTypeMatch(meta.colType, targetType) || meta.fieldNum != fieldNum {
+				alterSQLs = append(alterSQLs, fmt.Sprintf("MODIFY COLUMN %s %s%s", escapeMySQLName(fieldName), targetType, comment))
 			}
-			delete(remaining, fieldName) // 标记为已处理
-		} else {
-			// 字段不存在，新增字段
-			alterSQLs = append(alterSQLs, fmt.Sprintf("ADD COLUMN %s %s", escapeMySQLName(fieldName), targetType))
+			delete(remaining, fieldName)
+			continue
 		}
+
+		// 2) 字段号匹配（改名场景）：找到注释字段号一致但列名不同的现有列
+		if oldName, ok := byFieldNum[fieldNum]; ok {
+			if _, still := remaining[oldName]; still {
+				alterSQLs = append(alterSQLs, fmt.Sprintf("CHANGE COLUMN %s %s %s%s",
+					escapeMySQLName(oldName), escapeMySQLName(fieldName), targetType, comment))
+				delete(remaining, oldName)
+				continue
+			}
+		}
+
+		// 3) 全新字段
+		alterSQLs = append(alterSQLs, fmt.Sprintf("ADD COLUMN %s %s%s", escapeMySQLName(fieldName), targetType, comment))
 	}
 	return alterSQLs
 }
@@ -533,7 +626,12 @@ func (p *DB) UpdateTableField(m proto.Message) error {
 	if !ok {
 		return fmt.Errorf("%w: %s", ErrTableNotFound, tableName)
 	}
+	return p.syncTableSchema(tableName, table)
+}
 
+// syncTableSchema 按 registryKey（proto full name）对应的 table 同步 MySQL 表结构：
+// 表不存在则创建，存在则对齐字段类型。
+func (p *DB) syncTableSchema(registryKey string, table *MessageTable) error {
 	exists, err := p.IsTableExists(table.tableName)
 	if err != nil {
 		return fmt.Errorf("检查表 %s 存在性: %w", table.tableName, err)
@@ -549,10 +647,10 @@ func (p *DB) UpdateTableField(m proto.Message) error {
 		return nil
 	}
 
-	// 表已存在，同步字段结构
-	currentCols, err := p.getTableColumns(tableName)
+	// 表已存在，同步字段结构（读取列类型 + 字段号注释，支持按 Field id 改名保留数据）
+	currentCols, err := p.getTableColumnMeta(registryKey)
 	if err != nil {
-		return fmt.Errorf("获取表 %s 字段: %w", tableName, err)
+		return fmt.Errorf("获取表 %s 字段: %w", registryKey, err)
 	}
 
 	alterSQLs := table.buildAlterClauses(currentCols)
@@ -564,7 +662,7 @@ func (p *DB) UpdateTableField(m proto.Message) error {
 		if err != nil {
 			return fmt.Errorf("更新表 %s 结构失败: %w, SQL: %s", table.tableName, err, alterSQL)
 		}
-		p.clearColumnCache(tableName) // 清除缓存，下次查询时重新加载字段
+		p.clearColumnCache(registryKey) // 清除缓存，下次查询时重新加载字段
 	}
 
 	return nil
@@ -2025,6 +2123,65 @@ func newMessageTable(m proto.Message, opts ...TableOption) *MessageTable {
 func (p *DB) RegisterTable(m proto.Message, opts ...TableOption) {
 	table := newMessageTable(m, opts...)
 	p.Tables[GetTableName(m)] = table
+}
+
+// RegisterAllTables 扫描全局 proto 注册表（protoregistry.GlobalFiles），
+// 自动注册项目中所有“用于建表”的消息，返回被注册的表（按 proto full name）。
+//
+// 一个消息只有同时满足以下两个条件才会被注册：
+//  1. 其所在 .proto 文件声明了文件级选项 option (proto2mysql.db) = true;
+//  2. 该 message 自身声明了 option (proto2mysql.table_name) = "...";
+//
+// 即：db 文件选项圈定“哪些文件参与建表”，table_name 决定“文件里哪些 message 建表”。
+// 前提是这些 .proto 生成的 Go 代码已被链接进当前二进制（有 import，触发 init 注册到全局表）。
+func (p *DB) RegisterAllTables() []string {
+	var registered []string
+	protoregistry.GlobalFiles.RangeFiles(func(fd protoreflect.FileDescriptor) bool {
+		if FileHasDBOption(fd) {
+			registered = append(registered, p.registerTablesInMessages(fd.Messages())...)
+		}
+		return true
+	})
+	return registered
+}
+
+// registerTablesInMessages 递归遍历消息（含嵌套消息），注册声明了 table_name 的表。
+func (p *DB) registerTablesInMessages(msgs protoreflect.MessageDescriptors) []string {
+	var out []string
+	for i := 0; i < msgs.Len(); i++ {
+		md := msgs.Get(i)
+		if _, ok := TableNameFromDescriptor(md); ok {
+			p.registerTableFromDescriptor(md)
+			out = append(out, string(md.FullName()))
+		}
+		out = append(out, p.registerTablesInMessages(md.Messages())...)
+	}
+	return out
+}
+
+// registerTableFromDescriptor 从消息描述符构建并注册表（表配置自动从 message/field option 读取）。
+func (p *DB) registerTableFromDescriptor(md protoreflect.MessageDescriptor) {
+	table := &MessageTable{
+		tableName:  string(md.FullName()),
+		Descriptor: md,
+	}
+	for _, opt := range TableOptionsFromDescriptor(md) {
+		opt(table)
+	}
+	table.Init()
+	p.Tables[string(md.FullName())] = table
+}
+
+// SyncAllTables 对当前已注册的所有表执行建表/字段对齐：
+// 表不存在则创建，存在则对齐字段类型（等价于对每张表调用 UpdateTableField）。
+// 常与 RegisterAllTables 搭配：先自动注册，再一次性建/更新全部 MySQL 表。
+func (p *DB) SyncAllTables() error {
+	for key, table := range p.Tables {
+		if err := p.syncTableSchema(key, table); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // TableOption 表选项函数

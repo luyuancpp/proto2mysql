@@ -2,6 +2,8 @@ syntax = "proto3";
 
 import "proto2mysql_option.proto";
 
+option (proto2mysql.db) = true;
+
 // account 用于测试：带主键/自增/索引/唯一键选项。
 message account {
   option (proto2mysql.table_name)         = "account";

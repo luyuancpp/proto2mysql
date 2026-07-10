@@ -1,0 +1,10 @@
+syntax = "proto3";
+
+import "proto2mysql_option.proto";
+
+// unmarked 声明了表名，但文件没有 db 选项，筛选模式下应被忽略。
+message unmarked {
+  option (proto2mysql.table_name) = "unmarked";
+
+  uint64 id = 1;
+}

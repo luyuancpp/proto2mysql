@@ -3,8 +3,7 @@ package proto2mysql
 // 从 proto 描述符读取建表元数据（message option / field option），
 // 使调用方在 .proto 里声明表配置后，RegisterTable 无需再传任何代码级 TableOption。
 //
-// 选项定义见本仓库 proto/proto2mysql_option.proto（字段号与 luyuancpp/protooption 兼容，
-// 两套 .proto 任选其一 import 即可，运行时按字段号反射读取，不依赖具体生成代码）。
+// 选项定义见本仓库 proto/proto2mysql_option.proto，运行时按字段号反射读取。
 
 import (
 	"strings"
@@ -12,7 +11,7 @@ import (
 	"google.golang.org/protobuf/reflect/protoreflect"
 )
 
-// message option 字段号（与 protooption/proto_option.proto 保持一致）
+// message option 字段号
 const (
 	optNumTableName        = 500001 // 表名
 	optNumPrimaryKey       = 500002 // 主键（逗号分隔=联合主键）
@@ -25,6 +24,23 @@ const (
 const (
 	optNumFieldNullable = 600100 // 该字段允许为 NULL
 )
+
+// file option 字段号
+const (
+	optNumFileDB = 500000 // 标记该 .proto 文件用于 proto2mysql 建表
+)
+
+// FileHasDBOption 判断某个 .proto 文件是否声明了文件级 db 选项
+// （option (proto2mysql.db) = true;）。用于自动注册时筛选“用于建表”的文件。
+func FileHasDBOption(fd protoreflect.FileDescriptor) bool {
+	has := false
+	rangeExtensions(fd.Options(), func(num protoreflect.FieldNumber, v protoreflect.Value) {
+		if num == optNumFileDB && v.Bool() {
+			has = true
+		}
+	})
+	return has
+}
 
 // TableNameFromDescriptor 读取 message option 中的表名；第二返回值表示该消息是否声明了表选项。
 func TableNameFromDescriptor(md protoreflect.MessageDescriptor) (string, bool) {

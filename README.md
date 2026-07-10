@@ -28,6 +28,8 @@ package example;
 import "google/protobuf/timestamp.proto";
 import "proto2mysql_option.proto";  // 本仓库 proto/ 目录提供
 
+option (proto2mysql.db) = true;  // 文件级标识：本文件用于 proto2mysql 建表（供自动扫描识别）
+
 message User {
   option (proto2mysql.table_name)         = "user";
   option (proto2mysql.primary_key)        = "id";
@@ -46,10 +48,6 @@ message UserList {
   repeated User items = 1;  // 用于批量查询
 }
 ```
-
-> 也兼容 [luyuancpp/protooption](https://github.com/luyuancpp/protooption) 的
-> `OptionTableName`/`OptionPrimaryKey`/`OptionAutoIncrementKey`/`OptionIndex`/`OptionUniqueKey`
-> （扩展字段号一致，运行时按字段号反射读取，两套定义任选其一）。
 
 ### 2. 生成 Go 代码
 
@@ -138,13 +136,68 @@ func main() {
 }
 ```
 
+### 4. 自动注册（无需逐个 RegisterTable）
+
+如果接入方不想手动为每个消息调用 `RegisterTable`，可以让库自动扫描项目里的
+proto 描述符（descriptor option）来注册全部表。规则是：
+
+1. `.proto` 文件顶部声明 `option (proto2mysql.db) = true;`（文件级标识：本文件用于建表）；
+2. 文件里的某个 `message` 声明了 `option (proto2mysql.table_name) = "...";`。
+
+同时满足这两点的 message 才会被自动注册；只声明了 `db` 但没有 `table_name`
+的消息（如列表消息 `UserList`、内嵌子消息）会被跳过。
+
+前提：这些 `.proto` 生成的 Go 代码已被链接进当前二进制（有任意 `import`，
+其 `init` 会把描述符注册到 `protoregistry.GlobalFiles` 全局表）。
+
+```go
+pbDB := proto2mysql.NewDB()
+if err := pbDB.OpenDB(db, "testdb"); err != nil {
+	log.Fatalf("无法打开数据库: %v", err)
+}
+
+// 自动扫描全局描述符，注册所有“文件声明了 db 且 message 声明了 table_name”的表。
+// 返回被注册的表名（proto full name）列表。
+registered := pbDB.RegisterAllTables()
+log.Printf("自动注册的表: %v", registered)
+
+// 一次性对所有已注册的表建表 / 对齐字段（表不存在则创建，存在则 ALTER 对齐）。
+if err := pbDB.SyncAllTables(); err != nil {
+	log.Fatalf("同步表结构失败: %v", err)
+}
+
+// 之后即可直接 CRUD，无需再逐个 RegisterTable。
+```
+
+> 说明：是否建表只取决于各 `message` 是否声明了 `table_name`；文件级 `db`
+> 选项只用于圈定“哪些文件参与自动扫描”，不改变单个消息的建表行为。
+
 ## 核心功能
 
 ### 表结构管理
 
+- `RegisterTable(m proto.Message, opts ...TableOption)`: 手动注册单个消息与表的映射
+- `RegisterAllTables() []string`: 自动扫描全局描述符，注册所有“文件声明了 db 且 message 声明了 table_name”的表，返回被注册的表名
+- `SyncAllTables() error`: 对所有已注册的表批量建表/对齐字段
 - `CreateOrUpdateTable(m proto.Message)`: 创建表（如果不存在）或更新表结构
 - `UpdateTableField(m proto.Message)`: 同步表字段结构
 - `IsTableExists(tableName string) (bool, error)`: 检查表是否存在
+
+#### 按 proto 字段号（Field id）迁移，改名/改类型保留数据
+
+建表时每列都会写入注释 `COMMENT 'pb:<字段号>'`，记录该列对应的 proto 字段号。之后调用
+`UpdateTableField` / `SyncAllTables` / `GenerateMigrationSQL` 同步结构时，会先扫描线上表
+（读取 `information_schema` 的列类型与注释），并按如下优先级对齐：
+
+1. **列名相同**：类型不兼容时 `MODIFY COLUMN` 对齐类型（并回填字段号注释）；
+2. **列名不同但字段号相同**（即 proto 里把该字段改了名字）：用
+   `CHANGE COLUMN 旧列名 新列名 新类型 COMMENT 'pb:N'` 改名并对齐类型，**原有数据保留**；
+3. **找不到对应列**：`ADD COLUMN` 新增。
+
+> 注意：旧版本（本特性之前）建的表，列上没有 `pb:N` 注释，因此**首次**同步无法按字段号识别
+> 改名（会退化为按列名匹配）。首次同步会为同名列自动回填字段号注释，之后即可正常按字段号
+> 识别改名。新建的表从一开始就带注释，改名识别始终有效。
+> 该逻辑位于运行时库（需连库）；离线的 `proto2sql` 工具不连库，不做此扫描。
 
 ### 数据操作
 

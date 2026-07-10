@@ -54,7 +54,7 @@ func (p *DB) DumpCreateTableSQLFile(path string) error {
 
 // GenerateMigrationSQL 生成把线上表结构对齐到 proto 定义所需的 SQL：
 //   - 表不存在   → 返回 CREATE TABLE 语句
-//   - 表已存在   → 返回 ALTER TABLE（新增字段 / 类型对齐）语句
+//   - 表已存在   → 返回 ALTER TABLE（新增字段 / 按字段号改名 / 类型对齐）语句
 //   - 无任何差异 → 返回空串
 //
 // 需要已连库（读 information_schema 比对当前结构），且该消息对应表已 RegisterTable。
@@ -74,7 +74,7 @@ func (p *DB) GenerateMigrationSQL(m proto.Message) (string, error) {
 		return table.GetCreateTableSQL(), nil
 	}
 
-	currentCols, err := p.getTableColumns(tableName)
+	currentCols, err := p.getTableColumnMeta(tableName)
 	if err != nil {
 		return "", fmt.Errorf("get table %s columns: %w", tableName, err)
 	}

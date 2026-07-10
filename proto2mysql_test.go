@@ -1399,7 +1399,7 @@ func TestQueryOptionsSQLSuffix(t *testing.T) {
 }
 
 func TestMySQLIdentifierEscaping(t *testing.T) {
-	if got, want := escapeMySQLName("messageoption.GolangTest"), "`messageoption.GolangTest`"; got != want {
+	if got, want := escapeMySQLName("example.GolangTest"), "`example.GolangTest`"; got != want {
 		t.Fatalf("escapeMySQLName() = %q, 预期 %q", got, want)
 	}
 	if got, want := escapeMySQLName("weird`name"), "`weird``name`"; got != want {
@@ -2360,4 +2360,116 @@ func TestTableNameAndCASIntegration(t *testing.T) {
 	}
 
 	t.Log("自定义表名接线流程测试通过")
+}
+
+// TestRegisterAllTables 验证自动注册：扫描全局注册表，仅注册“所在文件声明了 db 选项
+// 且自身声明了 table_name”的 message；没有 table_name 的消息（如列表消息、player）应被忽略。
+func TestRegisterAllTables(t *testing.T) {
+	pdb := NewDB()
+	registered := pdb.RegisterAllTables()
+
+	regSet := make(map[string]bool, len(registered))
+	for _, name := range registered {
+		regSet[name] = true
+	}
+
+	// testpb.proto 声明了 option (proto2mysql.db) = true，且这些消息声明了 table_name。
+	for _, want := range []string{"golang_test", "golang_test1", "golang_test2", "golang_test3"} {
+		if !regSet[want] {
+			t.Errorf("预期自动注册表 %q，但未注册；已注册: %v", want, registered)
+		}
+		if _, ok := pdb.Tables[want]; !ok {
+			t.Errorf("表 %q 未进入 Tables", want)
+		}
+	}
+
+	// 没有 table_name 的消息不应被注册。
+	for _, notWant := range []string{"golang_test_list", "player"} {
+		if regSet[notWant] {
+			t.Errorf("消息 %q 未声明 table_name，不应被自动注册", notWant)
+		}
+	}
+}
+
+func TestColumnFieldNumberMetadata(t *testing.T) {
+	if got, want := columnComment(3), " COMMENT 'pb:3'"; got != want {
+		t.Fatalf("columnComment() = %q, want %q", got, want)
+	}
+
+	for _, tc := range []struct {
+		comment string
+		want    protoreflect.FieldNumber
+		ok      bool
+	}{
+		{comment: "pb:3", want: 3, ok: true},
+		{comment: "other:3"},
+		{comment: "pb:0"},
+		{comment: "pb:536870912"},
+		{comment: "pb:not-a-number"},
+	} {
+		got, ok := parseFieldNumFromComment(tc.comment)
+		if got != tc.want || ok != tc.ok {
+			t.Errorf("parseFieldNumFromComment(%q) = (%d, %v), want (%d, %v)", tc.comment, got, ok, tc.want, tc.ok)
+		}
+	}
+}
+
+func TestBuildAlterClausesUsesFieldNumbers(t *testing.T) {
+	table := newMessageTable(&testpb.GolangTest{})
+	ipField := table.Descriptor.Fields().ByName("ip")
+	ipType := table.getMySQLFieldType(ipField)
+
+	clauses := table.buildAlterClauses(map[string]columnMeta{
+		"old_ip": {colType: ipType, fieldNum: ipField.Number()},
+	})
+	joined := strings.Join(clauses, "\n")
+	wantRename := fmt.Sprintf("CHANGE COLUMN `old_ip` `ip` %s COMMENT 'pb:%d'", ipType, ipField.Number())
+	if !strings.Contains(joined, wantRename) {
+		t.Fatalf("missing field-number rename clause %q in:\n%s", wantRename, joined)
+	}
+
+	clauses = table.buildAlterClauses(map[string]columnMeta{
+		"ip": {colType: ipType},
+	})
+	joined = strings.Join(clauses, "\n")
+	wantBackfill := fmt.Sprintf("MODIFY COLUMN `ip` %s COMMENT 'pb:%d'", ipType, ipField.Number())
+	if !strings.Contains(joined, wantBackfill) {
+		t.Fatalf("missing legacy metadata backfill clause %q in:\n%s", wantBackfill, joined)
+	}
+}
+
+// TestBuildAlterClausesRenameByFieldNumber 单元测试：迁移时根据 proto 字段号(Field id)
+// 识别线上列——列名变化时用 CHANGE COLUMN 改名并对齐类型（保留数据），缺失字段用 ADD COLUMN，
+// 且生成的列均带 pb:N 注释以便后续继续按字段号识别。
+func TestBuildAlterClausesRenameByFieldNumber(t *testing.T) {
+	table := newMessageTable(&testpb.GolangTest{})
+
+	// 模拟线上表：字段 "ip"(号 2) 曾用列名 "ip_addr"（注释 pb:2），字段 "player_id"(号 6) 缺失。
+	current := map[string]columnMeta{
+		"id":       {colType: "int unsigned", fieldNum: 1},
+		"ip_addr":  {colType: "varchar(255)", fieldNum: 2},
+		"port":     {colType: "int unsigned", fieldNum: 3},
+		"group_id": {colType: "int unsigned", fieldNum: 4},
+		"player":   {colType: "mediumblob", fieldNum: 5},
+	}
+
+	clauses := table.buildAlterClauses(current)
+	joined := strings.Join(clauses, " | ")
+
+	// 按字段号识别到改名：CHANGE COLUMN `ip_addr` `ip`
+	if !strings.Contains(joined, "CHANGE COLUMN `ip_addr` `ip`") {
+		t.Errorf("应按字段号将 ip_addr 改名为 ip: %s", joined)
+	}
+	// 改名列须带字段号注释，便于后续迁移继续识别
+	if !strings.Contains(joined, "COMMENT 'pb:2'") {
+		t.Errorf("改名列应带 pb:2 注释: %s", joined)
+	}
+	// 缺失字段应新增
+	if !strings.Contains(joined, "ADD COLUMN `player_id`") {
+		t.Errorf("应新增缺失字段 player_id: %s", joined)
+	}
+	// ip 已按字段号改名，不应再被误判为新增（否则旧数据丢失）
+	if strings.Contains(joined, "ADD COLUMN `ip` ") {
+		t.Errorf("ip 已按字段号改名，不应再 ADD: %s", joined)
+	}
 }
