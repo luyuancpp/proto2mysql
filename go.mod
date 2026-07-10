@@ -4,7 +4,6 @@ go 1.26.5
 
 require (
 	github.com/go-sql-driver/mysql v1.8.1
-	github.com/luyuancpp/protooption v0.0.21
 	google.golang.org/protobuf v1.36.10
 	gorm.io/gorm v1.30.0
 )

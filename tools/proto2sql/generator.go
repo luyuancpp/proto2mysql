@@ -1,4 +1,4 @@
-// Package proto2sql 解析 .proto 源文件（读取 protooption 的建表相关 message option），
+// Package proto2sql 解析 .proto 源文件（读取本仓库 proto2mysql_option.proto 的建表相关 message option），
 // 复用 github.com/luyuancpp/proto2mysql 的 SQL 生成内核，产出 CREATE TABLE 语句。
 //
 // 与 proto2mysql 的分工：proto2mysql 是运行时库（吃编译好的 Go proto 类型、连库执行）；

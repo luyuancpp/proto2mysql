@@ -1,14 +1,14 @@
 syntax = "proto3";
 
-import "proto_option.proto";
+import "proto2mysql_option.proto";
 
 // account 用于测试：带主键/自增/索引/唯一键选项。
 message account {
-  option(OptionTableName)        = "account";
-  option(OptionPrimaryKey)       = "id";
-  option(OptionAutoIncrementKey) = "id";
-  option(OptionIndex)            = "name";
-  option(OptionUniqueKey)        = "email";
+  option (proto2mysql.table_name)         = "account";
+  option (proto2mysql.primary_key)        = "id";
+  option (proto2mysql.auto_increment_key) = "id";
+  option (proto2mysql.index)              = "name";
+  option (proto2mysql.unique_key)         = "email";
 
   uint64 id    = 1;
   string name  = 2;

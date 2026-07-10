@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	messageoption "github.com/luyuancpp/protooption"
+	testpb "github.com/luyuancpp/proto2mysql/internal/testpb"
 	"google.golang.org/protobuf/proto"
 )
 
@@ -63,7 +63,7 @@ func (f *fakeCache) Del(_ context.Context, keys ...string) error {
 
 func newCacheTestDB(cache Cache) *DB {
 	db := NewDB()
-	db.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id"))
+	db.RegisterTable(&testpb.GolangTest{}, WithPrimaryKey("id"))
 	if cache != nil {
 		db.EnableCache(cache, time.Minute)
 	}
@@ -74,24 +74,24 @@ func newCacheTestDB(cache Cache) *DB {
 func TestCacheKeyFormat(t *testing.T) {
 	db := newCacheTestDB(newFakeCache())
 
-	key, err := db.CacheKey(&messageoption.GolangTest{Id: 42})
+	key, err := db.CacheKey(&testpb.GolangTest{Id: 42})
 	if err != nil {
 		t.Fatalf("CacheKey失败: %v", err)
 	}
-	want := "pb:" + GetTableName(&messageoption.GolangTest{}) + ":42"
+	want := "pb:" + GetTableName(&testpb.GolangTest{}) + ":42"
 	if key != want {
 		t.Errorf("key = %q, 预期 %q", key, want)
 	}
 
 	// 复合主键：所有主键值依次拼接
 	db2 := NewDB()
-	db2.RegisterTable(&messageoption.GolangTest{}, WithPrimaryKey("id", "group_id"))
+	db2.RegisterTable(&testpb.GolangTest{}, WithPrimaryKey("id", "group_id"))
 	db2.EnableCache(newFakeCache(), time.Minute)
-	key2, err := db2.CacheKey(&messageoption.GolangTest{Id: 1, GroupId: 2})
+	key2, err := db2.CacheKey(&testpb.GolangTest{Id: 1, GroupId: 2})
 	if err != nil {
 		t.Fatalf("CacheKey失败: %v", err)
 	}
-	want2 := "pb:" + GetTableName(&messageoption.GolangTest{}) + ":1:2"
+	want2 := "pb:" + GetTableName(&testpb.GolangTest{}) + ":1:2"
 	if key2 != want2 {
 		t.Errorf("key = %q, 预期 %q", key2, want2)
 	}
@@ -101,15 +101,15 @@ func TestCacheKeyFormat(t *testing.T) {
 func TestCacheHitAndBackfill(t *testing.T) {
 	cache := newFakeCache()
 	db := newCacheTestDB(cache)
-	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
+	table := db.Tables[GetTableName(&testpb.GolangTest{})]
 
-	src := &messageoption.GolangTest{Id: 42, Ip: "10.0.0.1", Port: 8888}
+	src := &testpb.GolangTest{Id: 42, Ip: "10.0.0.1", Port: 8888}
 
 	// 回填
 	db.cacheSetProto(table, src)
 
 	// 命中：只带主键的消息应被填满
-	got := &messageoption.GolangTest{Id: 42}
+	got := &testpb.GolangTest{Id: 42}
 	if !db.cacheGetProto(table, got) {
 		t.Fatal("预期缓存命中")
 	}
@@ -118,7 +118,7 @@ func TestCacheHitAndBackfill(t *testing.T) {
 	}
 
 	// 未命中
-	miss := &messageoption.GolangTest{Id: 999}
+	miss := &testpb.GolangTest{Id: 999}
 	if db.cacheGetProto(table, miss) {
 		t.Error("不存在的key不应命中")
 	}
@@ -132,8 +132,8 @@ func TestCacheDegradation(t *testing.T) {
 	cache.delErr = errors.New("redis: connection refused")
 
 	db := newCacheTestDB(cache)
-	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
-	msg := &messageoption.GolangTest{Id: 1}
+	table := db.Tables[GetTableName(&testpb.GolangTest{})]
+	msg := &testpb.GolangTest{Id: 1}
 
 	// Get故障 → 未命中（降级读DB）
 	if db.cacheGetProto(table, msg) {
@@ -151,9 +151,9 @@ func TestCacheDegradation(t *testing.T) {
 func TestCacheCorruptedDataFallback(t *testing.T) {
 	cache := newFakeCache()
 	db := newCacheTestDB(cache)
-	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
+	table := db.Tables[GetTableName(&testpb.GolangTest{})]
 
-	msg := &messageoption.GolangTest{Id: 42}
+	msg := &testpb.GolangTest{Id: 42}
 	key, _ := cacheKeyFor(table, msg)
 	cache.data[key] = []byte{0xFF, 0xFF, 0xFF} // 非法proto数据
 
@@ -166,9 +166,9 @@ func TestCacheCorruptedDataFallback(t *testing.T) {
 func TestCacheInvalidateImmediate(t *testing.T) {
 	cache := newFakeCache()
 	db := newCacheTestDB(cache)
-	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
+	table := db.Tables[GetTableName(&testpb.GolangTest{})]
 
-	msg := &messageoption.GolangTest{Id: 42, Port: 1}
+	msg := &testpb.GolangTest{Id: 42, Port: 1}
 	db.cacheSetProto(table, msg)
 
 	db.invalidateMessages(table, msg)
@@ -186,9 +186,9 @@ func TestCacheInvalidateImmediate(t *testing.T) {
 func TestCacheInvalidateDeferredInTx(t *testing.T) {
 	cache := newFakeCache()
 	db := newCacheTestDB(cache)
-	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
+	table := db.Tables[GetTableName(&testpb.GolangTest{})]
 
-	msg := &messageoption.GolangTest{Id: 42, Port: 1}
+	msg := &testpb.GolangTest{Id: 42, Port: 1}
 	db.cacheSetProto(table, msg)
 
 	// 模拟事务上下文（只需tx非空，不执行真实SQL）
@@ -218,8 +218,8 @@ func TestCacheInvalidateDeferredInTx(t *testing.T) {
 // TestCacheDisabledNoop 未启用缓存时所有缓存操作为空操作
 func TestCacheDisabledNoop(t *testing.T) {
 	db := newCacheTestDB(nil)
-	table := db.Tables[GetTableName(&messageoption.GolangTest{})]
-	msg := &messageoption.GolangTest{Id: 1}
+	table := db.Tables[GetTableName(&testpb.GolangTest{})]
+	msg := &testpb.GolangTest{Id: 1}
 
 	if db.cacheEnabled() {
 		t.Error("未启用缓存时cacheEnabled应为false")

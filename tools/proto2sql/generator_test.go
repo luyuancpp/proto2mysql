@@ -2,29 +2,20 @@ package proto2sql
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"testing"
 )
 
-// protooptionDir 通过模块图定位 protooption 源码目录（其中含 proto_option.proto / descriptor.proto）。
-func protooptionDir(t *testing.T) string {
-	t.Helper()
-	out, err := exec.Command("go", "list", "-m", "-f", "{{.Dir}}", "github.com/luyuancpp/protooption").Output()
-	if err != nil {
-		t.Skipf("无法定位 protooption 模块（跳过）: %v", err)
-	}
-	dir := strings.TrimSpace(string(out))
-	if dir == "" {
-		t.Skip("protooption 模块目录为空，跳过")
-	}
-	return dir
+// optionProtoDir 返回本仓库自带选项定义（proto2mysql_option.proto）所在目录，
+// 供 protocompile 解析 account.proto 的 import。descriptor.proto 由标准 import 自动提供。
+func optionProtoDir() string {
+	return "../../proto"
 }
 
 func TestGenerate(t *testing.T) {
 	tables, err := Generate(context.Background(), Config{
 		ProtoFiles:  []string{"testdata/account.proto"},
-		ImportPaths: []string{protooptionDir(t)},
+		ImportPaths: []string{optionProtoDir()},
 	})
 	if err != nil {
 		t.Fatalf("Generate: %v", err)
@@ -57,7 +48,7 @@ func TestGenerate(t *testing.T) {
 func TestGenerateDrop(t *testing.T) {
 	tables, err := Generate(context.Background(), Config{
 		ProtoFiles:  []string{"testdata/account.proto"},
-		ImportPaths: []string{protooptionDir(t)},
+		ImportPaths: []string{optionProtoDir()},
 		Drop:        true,
 	})
 	if err != nil {
