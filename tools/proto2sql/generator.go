@@ -26,6 +26,9 @@ type Config struct {
 	// ImportPaths 额外的 import 搜索目录（用于定位被 import 的 proto 文件和 descriptor.proto 等）。
 	ImportPaths []string
 	// Drop 为 true 时，在每条 CREATE TABLE 前加 DROP TABLE IF EXISTS。
+	// ⚠️ 破坏性：DROP 会删除整张表及其全部数据。仅用于空库初始化 / 测试库重建，
+	// 切勿用于生产库或服务器启动流程。要在保留数据的前提下演进结构，请用运行时库的
+	// DB.SyncAllTables / DB.GenerateMigrationSQL（走 ALTER，不删数据）。
 	Drop bool
 	// RequireDBOption 为 true 时，只处理声明了文件级选项 option (proto2mysql.db) = true; 的
 	// .proto 文件（与运行时 DB.RegisterAllTables 的筛选规则一致）；未声明的文件整体跳过。

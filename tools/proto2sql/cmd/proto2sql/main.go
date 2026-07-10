@@ -11,6 +11,7 @@
 //   - -out    输出目录（默认当前目录，不存在会创建）。
 //   - -single 若指定，则所有表合并写入该文件；否则每张表一个 <表名>.sql。
 //   - -drop   在每条 CREATE TABLE 前加 DROP TABLE IF EXISTS。
+//     ⚠️ 破坏性：DROP 会删除整张表及其全部数据，仅用于空库/测试库初始化，切勿用于生产或服务器启动。
 package main
 
 import (
@@ -45,7 +46,7 @@ func main() {
 	flag.Var(&importDirs, "I", "import 搜索目录（可重复）")
 	flag.StringVar(&outDir, "out", ".", "输出目录")
 	flag.StringVar(&single, "single", "", "合并输出到单个文件名（相对 -out）；不设则每表一个文件")
-	flag.BoolVar(&drop, "drop", false, "每条 CREATE TABLE 前加 DROP TABLE IF EXISTS")
+	flag.BoolVar(&drop, "drop", false, "⚠️ 破坏性：每条 CREATE TABLE 前加 DROP TABLE IF EXISTS（会删除表及全部数据，仅用于空库/测试初始化）")
 	// 允许重复 -proto
 	var protoRepeated repeatedFlag
 	flag.Var(&protoRepeated, "proto-file", "要编译的 .proto 文件（可重复；等价于 -proto 的逐个形式）")
