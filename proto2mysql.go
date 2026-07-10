@@ -1998,11 +1998,16 @@ func (p *DB) FindMultiByWhereClauses(queries []MultiQuery) error {
 	return nil
 }
 
-// newMessageTable 构建消息-表映射并预生成SQL片段
+// newMessageTable 构建消息-表映射并预生成SQL片段。
+// 先应用proto描述符里声明的表选项（message/field option，见options.go），
+// 再应用代码传入的opts（优先级更高，可覆盖proto声明）。
 func newMessageTable(m proto.Message, opts ...TableOption) *MessageTable {
 	table := &MessageTable{
 		tableName:  GetTableName(m),
 		Descriptor: GetDescriptor(m),
+	}
+	for _, opt := range TableOptionsFromDescriptor(table.Descriptor) {
+		opt(table)
 	}
 	for _, opt := range opts {
 		opt(table)
@@ -2012,8 +2017,11 @@ func newMessageTable(m proto.Message, opts ...TableOption) *MessageTable {
 }
 
 // RegisterTable 注册Protobuf与表的映射关系。
+// 表配置（表名/主键/自增/索引/唯一键/可空字段）优先从proto的message option、
+// field option中读取（见proto/proto2mysql_option.proto），调用方通常无需传任何TableOption；
+// 显式传入的opts可覆盖proto里的声明。
 // 注册键固定为proto full name（查找路径统一按消息FullName解析）；
-// table.tableName仅决定生成SQL中的表名，可用WithTableName自定义。
+// table.tableName仅决定生成SQL中的表名。
 func (p *DB) RegisterTable(m proto.Message, opts ...TableOption) {
 	table := newMessageTable(m, opts...)
 	p.Tables[GetTableName(m)] = table

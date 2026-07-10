@@ -2143,6 +2143,46 @@ func TestExtendedCRUDInterfaces(t *testing.T) {
 	t.Log("扩展增删改查接口测试通过")
 }
 
+// TestDescriptorTableOptions 单元测试：表配置直接从proto的message option读取，
+// 调用方RegisterTable无需传任何TableOption；代码传入的选项仍可覆盖proto声明
+func TestDescriptorTableOptions(t *testing.T) {
+	// golang_test 在 .proto 里声明了 OptionTableName/OptionPrimaryKey/OptionAutoIncrementKey
+	table := newMessageTable(&messageoption.GolangTest{})
+	if table.tableName != "golang_test" {
+		t.Errorf("表名应从OptionTableName读取，实际%q", table.tableName)
+	}
+	if len(table.primaryKey) != 1 || table.primaryKey[0] != "id" {
+		t.Errorf("主键应从OptionPrimaryKey读取，实际%v", table.primaryKey)
+	}
+	if table.autoIncreaseKey != "id" {
+		t.Errorf("自增字段应从OptionAutoIncrementKey读取，实际%q", table.autoIncreaseKey)
+	}
+
+	// 建表SQL应带主键与自增
+	sql := GenerateCreateTableSQL(&messageoption.GolangTest{})
+	if !strings.Contains(sql, "PRIMARY KEY (`id`)") || !strings.Contains(sql, "AUTO_INCREMENT") {
+		t.Errorf("建表SQL应包含proto声明的主键/自增: %s", sql)
+	}
+
+	// 代码传入的TableOption优先级更高
+	override := newMessageTable(&messageoption.GolangTest{},
+		WithTableName("custom_name"), WithPrimaryKey("group_id"))
+	if override.tableName != "custom_name" {
+		t.Errorf("显式WithTableName应覆盖proto声明，实际%q", override.tableName)
+	}
+	if len(override.primaryKey) != 1 || override.primaryKey[0] != "group_id" {
+		t.Errorf("显式WithPrimaryKey应覆盖proto声明，实际%v", override.primaryKey)
+	}
+
+	// 索引选项解析：分号分隔多个索引，索引内逗号=联合索引；主键逗号=联合主键
+	if got := splitOptionIndexes("player_id; zone_id,created_at"); len(got) != 2 || got[0] != "player_id" || got[1] != "zone_id,created_at" {
+		t.Errorf("索引拆分错误: %v", got)
+	}
+	if got := splitOptionCSV("user_id, provider"); len(got) != 2 || got[0] != "user_id" || got[1] != "provider" {
+		t.Errorf("CSV拆分错误: %v", got)
+	}
+}
+
 // TestWithTableNameRegistration 单元测试：自定义表名只影响SQL，注册键仍为proto full name
 func TestWithTableNameRegistration(t *testing.T) {
 	pdb := NewDB()

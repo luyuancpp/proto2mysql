@@ -19,19 +19,26 @@ go get github.com/your-username/proto2mysql
 
 ## 快速开始
 
-### 1. 定义 Protobuf 消息
+### 1. 定义 Protobuf 消息（表配置直接写在 proto 里）
 
 ```protobuf
 syntax = "proto3";
 package example;
 
 import "google/protobuf/timestamp.proto";
+import "proto2mysql_option.proto";  // 本仓库 proto/ 目录提供
 
 message User {
+  option (proto2mysql.table_name)         = "user";
+  option (proto2mysql.primary_key)        = "id";
+  option (proto2mysql.auto_increment_key) = "id";
+  option (proto2mysql.unique_key)         = "email";        // 逗号分隔 = 联合唯一键
+  option (proto2mysql.index)              = "name;age";     // 分号分隔多个索引，索引内逗号 = 联合索引
+
   int64  id         = 1;
   string name       = 2;
   string email      = 3;
-  int32  age        = 4;
+  int32  age        = 4 [(proto2mysql.nullable) = true];    // 该列允许为 NULL
   google.protobuf.Timestamp create_time = 5;
 }
 
@@ -39,6 +46,10 @@ message UserList {
   repeated User items = 1;  // 用于批量查询
 }
 ```
+
+> 也兼容 [luyuancpp/protooption](https://github.com/luyuancpp/protooption) 的
+> `OptionTableName`/`OptionPrimaryKey`/`OptionAutoIncrementKey`/`OptionIndex`/`OptionUniqueKey`
+> （扩展字段号一致，运行时按字段号反射读取，两套定义任选其一）。
 
 ### 2. 生成 Go 代码
 
@@ -76,14 +87,10 @@ func main() {
 	}
 
 	// 3. 注册 Protobuf 消息与表的映射关系
-	pbDB.RegisterTable(
-		&pb.User{},
-		proto2mysql.WithPrimaryKey("id"),          // 设置主键
-		proto2mysql.WithAutoIncrementKey("id"),    // 设置自增字段
-		proto2mysql.WithUniqueKey("email"),        // 设置唯一键
-		proto2mysql.WithIndexes("name", "age"),    // 设置普通索引
-		proto2mysql.WithNullableFields("age"),     // 设置允许为 NULL 的字段
-	)
+	// 表配置（表名/主键/自增/索引/唯一键/可空字段）自动从 proto 的 option 中读取，无需传参；
+	// 也可以传 TableOption 覆盖 proto 里的声明（proto 未声明时同样可用代码配置）：
+	// pbDB.RegisterTable(&pb.User{}, proto2mysql.WithPrimaryKey("id"), ...)
+	pbDB.RegisterTable(&pb.User{})
 
 	// 4. 创建或更新表结构
 	if err := pbDB.CreateOrUpdateTable(&pb.User{}); err != nil {
